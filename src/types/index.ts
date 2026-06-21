@@ -1,3 +1,25 @@
+export interface TimelineEvent {
+  event_type: 'register' | 'upload_attachment' | 'delete_attachment' | 'status_change'
+    | 'generate_handover' | 'complete_material' | 'stamped_change' | 'settled_change' | 'edit'
+  event_name: string
+  operator: string
+  happened_at: string
+  detail?: string
+  attachment_id?: number
+  material_name?: string
+  handover_path?: string
+  old_value?: string
+  new_value?: string
+}
+
+export interface CompletionRecord {
+  material_name: string
+  completed_at: string
+  operator: string
+  attachment_ids?: number[]
+  note?: string
+}
+
 export interface LedgerRecord {
   id?: number
   ledger_no: string
@@ -15,6 +37,9 @@ export interface LedgerRecord {
   remark?: string
   created_at?: string
   updated_at?: string
+  timeline?: TimelineEvent[]
+  completion_records?: CompletionRecord[]
+  last_operator?: string
 }
 
 export interface Attachment {
@@ -25,7 +50,34 @@ export interface Attachment {
   file_size: number
   file_type: string
   category: string
+  uploaded_by?: string
   created_at?: string
+}
+
+export interface UrgencyNoticeItem {
+  proposed_by: string
+  month: string
+  total_records: number
+  missing_stamp_count: number
+  missing_settlement_count: number
+  missing_attachment_count: number
+  missing_materials_detail: Record<string, number>
+  records: Array<{
+    id: number
+    ledger_no: string
+    project_name: string
+    building_location: string
+    specialty: string
+    flow_status: string
+    stamped: number
+    settled: number
+    missing_materials: string[]
+  }>
+}
+
+export interface HandoverBatchOptions {
+  groupBy: 'proposed_by' | 'month' | 'none'
+  packageName?: string
 }
 
 export const RECORD_TYPES = ['设计变更', '工程洽商', '现场签证'] as const
@@ -102,20 +154,22 @@ export const MATERIAL_CATEGORIES = [
   { key: '现场照片', requiresAttachment: '照片', description: '现场实况照片' }
 ] as const
 
+export const DEFAULT_OPERATOR = '资料员'
+
 declare global {
   interface Window {
     electronAPI: {
       getUserDataPath: () => Promise<{ userDataPath: string; attachmentsPath: string }>
       generateLedgerNo: (recordType: string, projectName: string) => Promise<string>
-      addRecord: (record: LedgerRecord) => Promise<{ id: number; record: LedgerRecord }>
-      updateRecord: (id: number, record: Partial<LedgerRecord>) => Promise<boolean>
+      addRecord: (record: LedgerRecord, operator?: string) => Promise<{ id: number; record: LedgerRecord }>
+      updateRecord: (id: number, record: Partial<LedgerRecord>, operator?: string) => Promise<boolean>
       deleteRecord: (id: number) => Promise<boolean>
       getAllRecords: () => Promise<LedgerRecord[]>
       searchRecords: (filters: any) => Promise<LedgerRecord[]>
       getAttachments: (recordId: number) => Promise<Attachment[]>
       addAttachment: (attachment: Attachment) => Promise<number>
-      deleteAttachmentFile: (id: number) => Promise<boolean>
-      saveAndRegisterFile: (sourcePath: string, recordNo: string, recordId: number, category: string) => Promise<Attachment | null>
+      deleteAttachmentFile: (id: number, operator?: string) => Promise<boolean>
+      saveAndRegisterFile: (sourcePath: string, recordNo: string, recordId: number, category: string, operator?: string) => Promise<Attachment | null>
       saveFileToDirectory: (sourcePath: string, recordNo: string, fileName: string) => Promise<string>
       selectFileDialog: () => Promise<{ canceled: boolean; filePaths: string[] }>
       openFolder: (folderPath: string) => Promise<boolean>
@@ -123,7 +177,12 @@ declare global {
       getAttachmentCounts: () => Promise<Record<number, number>>
       getUrgencyBoard: () => Promise<any[]>
       exportExcel: (records: LedgerRecord[]) => Promise<string | false>
-      generateHandoverPackage: (recordId: number) => Promise<false | { path: string; manifest: any }>
+      generateHandoverPackage: (recordId: number, operator?: string) => Promise<false | { path: string; manifest: any }>
+      generateBatchHandoverPackage: (recordIds: number[], options: HandoverBatchOptions, operator?: string) => Promise<false | { path: string; manifest: any }>
+      exportUrgencyNotice: (boardItems: any[], options?: { format?: 'xlsx' | 'text'; proposed_by?: string; month?: string }) => Promise<string | false>
+      confirmMaterialCompletion: (recordId: number, materials: string[], operator: string, note?: string) => Promise<boolean>
+      getOperator: () => Promise<string>
+      setOperator: (name: string) => Promise<boolean>
     }
   }
 }

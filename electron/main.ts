@@ -6,9 +6,10 @@ import {
   searchRecords, getAllAttachments, addAttachment, deleteAttachment,
   generateLedgerNo, getMonthlySummary, getAttachmentCounts,
   saveFileAndAddAttachment, deleteAttachmentWithFile,
-  generateHandoverPackage, getUrgencyBoard,
-  exportRecordsToExcel, getRecordById,
-  LedgerRecord, Attachment
+  generateHandoverPackage, generateBatchHandoverPackage, getUrgencyBoard,
+  exportRecordsToExcel, exportUrgencyNotice, getRecordById,
+  confirmMaterialCompletion, getOperator, setOperator,
+  LedgerRecord, Attachment, HandoverBatchOptions
 } from './db'
 
 let mainWindow: BrowserWindow | null = null
@@ -57,14 +58,13 @@ app.whenReady().then(() => {
     return generateLedgerNo(recordType, projectName)
   })
 
-  ipcMain.handle('add-record', (_e, record: LedgerRecord) => {
-    const id = addRecord(record)
-    const newRecord = getRecordById(id)
-    return { id, record: newRecord }
+  ipcMain.handle('add-record', (_e, record: LedgerRecord, operator?: string) => {
+    const { id, record: savedRecord } = addRecord(record, operator)
+    return { id, record: savedRecord }
   })
 
-  ipcMain.handle('update-record', (_e, id: number, record: Partial<LedgerRecord>) => {
-    return updateRecord(id, record)
+  ipcMain.handle('update-record', (_e, id: number, record: Partial<LedgerRecord>, operator?: string) => {
+    return updateRecord(id, record, operator)
   })
 
   ipcMain.handle('delete-record', (_e, id: number) => {
@@ -87,12 +87,12 @@ app.whenReady().then(() => {
     return addAttachment(attachment)
   })
 
-  ipcMain.handle('delete-attachment-file', async (_e, id: number) => {
-    return deleteAttachmentWithFile(id)
+  ipcMain.handle('delete-attachment-file', async (_e, id: number, operator?: string) => {
+    return deleteAttachmentWithFile(id, operator)
   })
 
-  ipcMain.handle('save-and-register-file', async (_e, sourcePath: string, recordNo: string, recordId: number, category: string) => {
-    return saveFileAndAddAttachment(sourcePath, recordNo, recordId, category)
+  ipcMain.handle('save-and-register-file', async (_e, sourcePath: string, recordNo: string, recordId: number, category: string, operator?: string) => {
+    return saveFileAndAddAttachment(sourcePath, recordNo, recordId, category, operator)
   })
 
   ipcMain.handle('save-file-to-directory', async (_e, sourcePath: string, recordNo: string, fileName: string) => {
@@ -149,19 +149,64 @@ app.whenReady().then(() => {
     return false
   })
 
-  ipcMain.handle('generate-handover-package', async (_e, recordId: number) => {
+  ipcMain.handle('generate-handover-package', async (_e, recordId: number, operator?: string) => {
     if (!mainWindow) return false
     const result = await dialog.showOpenDialog(mainWindow, {
       title: '选择移交包保存位置',
       properties: ['openDirectory']
     })
     if (result.canceled || result.filePaths.length === 0) return false
-    const pkg = generateHandoverPackage(recordId, result.filePaths[0])
+    const pkg = generateHandoverPackage(recordId, result.filePaths[0], operator)
     if (pkg) {
       shell.openPath(pkg.path)
       return pkg
     }
     return false
+  })
+
+  ipcMain.handle('generate-batch-handover-package', async (_e, recordIds: number[], options: HandoverBatchOptions, operator?: string) => {
+    if (!mainWindow) return false
+    const dirResult = await dialog.showOpenDialog(mainWindow, {
+      title: '选择批量移交包保存位置',
+      properties: ['openDirectory']
+    })
+    if (dirResult.canceled || dirResult.filePaths.length === 0) return false
+    const pkg = generateBatchHandoverPackage(recordIds, options, dirResult.filePaths[0], operator)
+    if (pkg) {
+      shell.openPath(pkg.path)
+      return pkg
+    }
+    return false
+  })
+
+  ipcMain.handle('export-urgency-notice', async (_e, boardItems: any[], options?: { format?: 'xlsx' | 'text'; proposed_by?: string; month?: string }) => {
+    if (!mainWindow) return false
+    if (options?.format === 'text') {
+      return exportUrgencyNotice(boardItems, { format: 'text', proposed_by: options.proposed_by, month: options.month })
+    }
+    const defaultName = `催办单_${require('dayjs')().format('YYYYMMDD_HHmmss')}.xlsx`
+    const result = await dialog.showSaveDialog(mainWindow, {
+      defaultPath: defaultName,
+      filters: [{ name: 'Excel 文件', extensions: ['xlsx'] }]
+    })
+    if (!result.canceled && result.filePath) {
+      const dir = path.dirname(result.filePath)
+      const name = path.basename(result.filePath)
+      return exportUrgencyNotice(boardItems, options || {}, dir, name)
+    }
+    return false
+  })
+
+  ipcMain.handle('confirm-material-completion', (_e, recordId: number, materials: string[], operator: string, note?: string) => {
+    return confirmMaterialCompletion(recordId, materials, operator, note)
+  })
+
+  ipcMain.handle('get-operator', () => {
+    return getOperator()
+  })
+
+  ipcMain.handle('set-operator', (_e, name: string) => {
+    return setOperator(name)
   })
 
   createWindow()

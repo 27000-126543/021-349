@@ -28,13 +28,14 @@ import {
   PaperClipOutlined,
   EyeOutlined,
   PlusOutlined,
-  FileDoneOutlined
+  FileDoneOutlined,
+  UserOutlined
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import { useNavigate } from 'react-router-dom'
 import {
   RECORD_TYPES, SPECIALTIES, FLOW_STATUSES, PROPOSED_BY_OPTIONS,
-  REQUIRED_FIELDS_FOR_SAVE, FIELD_LABELS, LedgerRecord
+  REQUIRED_FIELDS_FOR_SAVE, FIELD_LABELS, LedgerRecord, DEFAULT_OPERATOR
 } from '../types'
 
 const { TextArea } = Input
@@ -51,6 +52,37 @@ const AddRecordPage: React.FC = () => {
     record: LedgerRecord | null
     id: number
   }>({ open: false, record: null, id: 0 })
+  const [operator, setOperatorState] = useState<string>(DEFAULT_OPERATOR)
+  const [operatorModal, setOperatorModal] = useState(false)
+  const [operatorInput, setOperatorInput] = useState('')
+
+  useEffect(() => {
+    loadOperator()
+  }, [])
+
+  const loadOperator = async () => {
+    try {
+      const op = await window.electronAPI.getOperator()
+      setOperatorState(op || DEFAULT_OPERATOR)
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
+  const saveOperator = async () => {
+    if (!operatorInput.trim()) {
+      message.warning('请输入经办人姓名')
+      return
+    }
+    try {
+      await window.electronAPI.setOperator(operatorInput.trim())
+      setOperatorState(operatorInput.trim())
+      setOperatorModal(false)
+      message.success(`经办人已设置为：${operatorInput.trim()}`)
+    } catch (e) {
+      message.error('保存失败')
+    }
+  }
 
   const missingFields = useMemo(() => {
     const missing: string[] = []
@@ -117,7 +149,7 @@ const AddRecordPage: React.FC = () => {
         receive_date: values.receive_date ? dayjs(values.receive_date).format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD')
       }
 
-      const result = await window.electronAPI.addRecord(record)
+      const result = await window.electronAPI.addRecord(record, operator)
       if (result && result.id) {
         setSuccessModal({
           open: true,
@@ -172,7 +204,14 @@ const AddRecordPage: React.FC = () => {
 
   return (
     <div className="page-card">
-      <h2 className="page-title">新增登记</h2>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <h2 className="page-title" style={{ margin: 0 }}>新增登记</h2>
+        <Tooltip title={`当前经办人：${operator}，登记台账会记录此经办人`}>
+          <Button icon={<UserOutlined />} onClick={() => { setOperatorInput(operator); setOperatorModal(true) }}>
+            经办人：{operator}
+          </Button>
+        </Tooltip>
+      </div>
 
       <Card style={{ marginBottom: 20, background: canSave ? '#f6ffed' : '#fff7e6', border: canSave ? '1px solid #b7eb8f' : '1px solid #ffe58f' }}>
         <Row align="middle" gutter={16}>
@@ -480,6 +519,26 @@ const AddRecordPage: React.FC = () => {
             </Col>
           </Row>
         </Result>
+      </Modal>
+
+      <Modal
+        title="设置经办人"
+        open={operatorModal}
+        onOk={saveOperator}
+        onCancel={() => setOperatorModal(false)}
+        okText="保存"
+        cancelText="取消"
+      >
+        <Input
+          prefix={<UserOutlined />}
+          placeholder="请输入经办人姓名"
+          value={operatorInput}
+          onChange={(e) => setOperatorInput(e.target.value)}
+          onPressEnter={saveOperator}
+        />
+        <div style={{ marginTop: 8, color: '#8c8c8c', fontSize: 12 }}>
+          登记台账、上传附件、补齐材料、生成移交包操作均会记录此经办人
+        </div>
       </Modal>
     </div>
   )

@@ -21,7 +21,10 @@ import {
   Tabs,
   Statistic,
   Tooltip,
-  Collapse
+  Collapse,
+  Radio,
+  Timeline as AntdTimeline,
+  Typography
 } from 'antd'
 import {
   SearchOutlined,
@@ -37,19 +40,72 @@ import {
   PaperClipOutlined,
   TeamOutlined,
   ClockCircleOutlined,
-  FileExcelOutlined
+  FileExcelOutlined,
+  FileOutlined,
+  CopyOutlined,
+  UserOutlined,
+  FormOutlined,
+  UploadOutlined,
+  FileDoneOutlined,
+  SolutionOutlined,
+  EditOutlined,
+  SendOutlined
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import {
   LedgerRecord, Attachment, RECORD_TYPES, SPECIALTIES, FLOW_STATUSES, PROPOSED_BY_OPTIONS,
-  getMissingMaterials, ATTACHMENT_CATEGORIES, CATEGORY_COLOR_MAP
+  getMissingMaterials, ATTACHMENT_CATEGORIES, CATEGORY_COLOR_MAP, DEFAULT_OPERATOR, TimelineEvent
 } from '../types'
 
 const { RangePicker } = DatePicker
 const { Option } = Select
 const { Panel } = Collapse
+const { Text } = Typography
 
 const flowStatusOrder = ['待审核', '审核中', '已审核', '施工中', '已完工', '已盖章', '已结算', '已归档']
+
+const getTimelineIcon = (type: string) => {
+  switch (type) {
+    case 'register': return <FileTextOutlined style={{ color: '#1677ff' }} />
+    case 'edit': return <EditOutlined style={{ color: '#1677ff' }} />
+    case 'upload_attachment': return <UploadOutlined style={{ color: '#52c41a' }} />
+    case 'delete_attachment': return <DeleteOutlined style={{ color: '#cf1322' }} />
+    case 'status_change': return <ClockCircleOutlined style={{ color: '#1677ff' }} />
+    case 'stamped_change': return <FileDoneOutlined style={{ color: '#eb2f96' }} />
+    case 'settled_change': return <FileExcelOutlined style={{ color: '#722ed1' }} />
+    case 'generate_handover': return <FileExcelOutlined style={{ color: '#52c41a' }} />
+    case 'complete_material': return <CheckCircleOutlined style={{ color: '#52c41a' }} />
+    default: return <FileOutlined style={{ color: '#8c8c8c' }} />
+  }
+}
+
+const getTimelineColor = (type: string) => {
+  switch (type) {
+    case 'register': return 'blue'
+    case 'upload_attachment': return 'green'
+    case 'delete_attachment': return 'red'
+    case 'stamped_change': return 'magenta'
+    case 'settled_change': return 'purple'
+    case 'generate_handover': return 'green'
+    case 'complete_material': return 'green'
+    default: return 'blue'
+  }
+}
+
+const getTimelineLabel = (type: string) => {
+  const map: Record<string, string> = {
+    register: '登记台账',
+    edit: '编辑',
+    upload_attachment: '上传附件',
+    delete_attachment: '删除附件',
+    status_change: '状态变更',
+    stamped_change: '盖章状态',
+    settled_change: '结算状态',
+    generate_handover: '生成移交包',
+    complete_material: '材料补齐确认'
+  }
+  return map[type] || type
+}
 
 const QueryPage: React.FC = () => {
   const [records, setRecords] = useState<LedgerRecord[]>([])
@@ -73,6 +129,13 @@ const QueryPage: React.FC = () => {
   const [urgencyData, setUrgencyData] = useState<any[]>([])
   const [selectedUrgency, setSelectedUrgency] = useState<{ proposed_by: string; month: string } | null>(null)
   const [urgencyRecords, setUrgencyRecords] = useState<any[]>([])
+  const [operator, setOperatorState] = useState<string>(DEFAULT_OPERATOR)
+  const [operatorModal, setOperatorModal] = useState(false)
+  const [operatorInput, setOperatorInput] = useState('')
+
+  const [urgencyExportModal, setUrgencyExportModal] = useState(false)
+  const [urgencyExportUnit, setUrgencyExportUnit] = useState<string>('')
+  const [urgencyExportMonth, setUrgencyExportMonth] = useState<string>('')
 
   const loadRecords = async () => {
     setLoading(true)
@@ -84,11 +147,6 @@ const QueryPage: React.FC = () => {
       }
       const data = await window.electronAPI.searchRecords(searchParams)
       setRecords(data)
-      const ids = data.map(r => r.id!)
-      let batch: Record<number, Attachment[]> = {}
-      try {
-        batch = await window.electronAPI.getAttachmentCounts() as any
-      } catch (e) { }
       const atb: Record<number, Attachment[]> = {}
       for (const r of data) {
         const atts = await window.electronAPI.getAttachments(r.id!)
@@ -120,20 +178,42 @@ const QueryPage: React.FC = () => {
     }
   }
 
+  const loadOperator = async () => {
+    try {
+      const op = await window.electronAPI.getOperator()
+      setOperatorState(op || DEFAULT_OPERATOR)
+    } catch (e) {
+      console.error(e)
+    }
+  }
+
+  useEffect(() => {
+    loadOperator()
+  }, [])
+
   useEffect(() => {
     loadRecords()
     loadMonthlySummary()
     loadUrgencyBoard()
+  }, [])
 
+  useEffect(() => {
     const fid = sessionStorage.getItem('focusRecordId')
     if (fid) {
       sessionStorage.removeItem('focusRecordId')
-      setTimeout(() => {
-        const r = records.find(x => String(x.id) === fid)
-        if (r) handleViewDetail(r)
-      }, 800)
+      const id = Number(fid)
+      const tryFocus = () => {
+        const r = records.find(x => x.id === id)
+        if (r) {
+          handleViewDetail(r)
+          message.success(`已定位到 ${r.ledger_no} 的详情`)
+        } else if (records.length === 0) {
+          setTimeout(tryFocus, 500)
+        }
+      }
+      tryFocus()
     }
-  }, [])
+  }, [records])
 
   const handleSearch = () => {
     loadRecords()
@@ -169,11 +249,30 @@ const QueryPage: React.FC = () => {
   const handleViewDetail = async (record: LedgerRecord) => {
     setDetailModal(record)
     setDetailVisible(true)
+    loadAttachmentsForDetail(record)
+  }
+
+  const loadAttachmentsForDetail = async (record: LedgerRecord) => {
     try {
       const atts = await window.electronAPI.getAttachments(record.id!)
       setDetailAttachments(atts)
     } catch (e) {
       setDetailAttachments([])
+    }
+  }
+
+  const saveOperator = async () => {
+    if (!operatorInput.trim()) {
+      message.warning('请输入经办人姓名')
+      return
+    }
+    try {
+      await window.electronAPI.setOperator(operatorInput.trim())
+      setOperatorState(operatorInput.trim())
+      setOperatorModal(false)
+      message.success(`经办人已设置为：${operatorInput.trim()}`)
+    } catch (e) {
+      message.error('保存失败')
     }
   }
 
@@ -234,6 +333,59 @@ const QueryPage: React.FC = () => {
       message.destroy('exp')
       console.error(e)
       message.error('导出失败')
+    }
+  }
+
+  const handleExportUrgencyExcel = async () => {
+    try {
+      message.loading({ content: '正在生成催办单...', key: 'urg' })
+      const opts: any = { format: 'xlsx' as const }
+      if (urgencyExportUnit) opts.proposed_by = urgencyExportUnit
+      if (urgencyExportMonth) opts.month = urgencyExportMonth
+      const result = await window.electronAPI.exportUrgencyNotice(urgencyData, opts)
+      message.destroy('urg')
+      if (result) {
+        message.success(`催办单 Excel 已生成`)
+        setUrgencyExportModal(false)
+      } else {
+        message.error('生成失败')
+      }
+    } catch (e) {
+      message.destroy('urg')
+      console.error(e)
+      message.error('生成催办单失败')
+    }
+  }
+
+  const handleCopyUrgencyText = async () => {
+    try {
+      message.loading({ content: '正在生成催办文本...', key: 'urgtxt' })
+      const opts: any = { format: 'text' as const }
+      if (urgencyExportUnit) opts.proposed_by = urgencyExportUnit
+      if (urgencyExportMonth) opts.month = urgencyExportMonth
+      const result = await window.electronAPI.exportUrgencyNotice(urgencyData, opts)
+      message.destroy('urgtxt')
+      if (result && typeof result === 'string') {
+        try {
+          await navigator.clipboard.writeText(result)
+          message.success('催办文本已复制到剪贴板，可直接粘贴到微信发送')
+          setUrgencyExportModal(false)
+        } catch (clipErr) {
+          message.destroy('urgtxt')
+          Modal.info({
+            title: '催办文本已生成，请手动复制',
+            content: <div style={{ maxHeight: 500, overflow: 'auto' }}>
+              <pre style={{ whiteSpace: 'pre-wrap', fontSize: 12, background: '#f5f5f5', padding: 12 }}>{result}</pre>
+            </div>
+          })
+        }
+      } else {
+        message.error('生成失败')
+      }
+    } catch (e) {
+      message.destroy('urgtxt')
+      console.error(e)
+      message.error('生成催办文本失败')
     }
   }
 
@@ -447,12 +599,12 @@ const QueryPage: React.FC = () => {
       return (
         <div>
           <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <Space>
-              <Button onClick={handleBackToSummary}>返回月度汇总</Button>
-              <span style={{ fontSize: 16, fontWeight: 600 }}>{selectedMonth} 月度单据明细</span>
-              <Tag color="blue">{monthRecords.length} 条记录</Tag>
-            </Space>
-          </div>
+          <Space>
+            <Button onClick={handleBackToSummary}>返回月度汇总</Button>
+            <span style={{ fontSize: 16, fontWeight: 600 }}>{selectedMonth} 月度单据明细</span>
+            <Tag color="blue">{monthRecords.length} 条记录</Tag>
+          </Space>
+        </div>
           <Table
             columns={monthDetailColumns}
             dataSource={monthRecords}
@@ -535,6 +687,18 @@ const QueryPage: React.FC = () => {
     )
   }
 
+  const urgencyUnits = useMemo(() => {
+    const units = new Set<string>()
+    urgencyData.forEach((d: any) => units.add(d.proposed_by))
+    return Array.from(units).sort()
+  }, [urgencyData])
+
+  const urgencyMonths = useMemo(() => {
+    const months = new Set<string>()
+    urgencyData.forEach((d: any) => months.add(d.month))
+    return Array.from(months).sort().reverse()
+  }, [urgencyData])
+
   const renderUrgencyView = () => {
     if (selectedUrgency) {
       return (
@@ -546,6 +710,18 @@ const QueryPage: React.FC = () => {
                 {selectedUrgency.proposed_by} · {selectedUrgency.month}
               </span>
               <Tag color="blue">{urgencyRecords.length} 条待追单据</Tag>
+            </Space>
+            <Space>
+              <Button
+                icon={<FileExcelOutlined />}
+                onClick={() => {
+                  setUrgencyExportUnit(selectedUrgency.proposed_by)
+                  setUrgencyExportMonth(selectedUrgency.month)
+                  setUrgencyExportModal(true)
+                }}
+              >
+                生成本月催办单
+              </Button>
             </Space>
           </div>
           <Table
@@ -590,8 +766,8 @@ const QueryPage: React.FC = () => {
 
     return (
       <div>
-        <div style={{ marginBottom: 16 }}>
-          <Row gutter={16}>
+        <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <Row gutter={16} style={{ flex: 1 }}>
             <Col span={8}>
               <Card size="small">
                 <Statistic title="责任单位总数" value={unitList.length} prefix={<TeamOutlined />} />
@@ -617,6 +793,26 @@ const QueryPage: React.FC = () => {
               </Card>
             </Col>
           </Row>
+          <Space style={{ marginLeft: 16 }}>
+            <Tooltip title="按筛选条件生成催办单（全部单位）">
+              <Button
+                type="primary"
+                icon={<SendOutlined />}
+                onClick={() => {
+                  setUrgencyExportUnit('')
+                  setUrgencyExportMonth('')
+                  setUrgencyExportModal(true)
+                }}
+              >
+                生成催办单
+              </Button>
+            </Tooltip>
+            <Tooltip title={`当前经办人：${operator}`}>
+              <Button icon={<UserOutlined />} onClick={() => { setOperatorInput(operator); setOperatorModal(true) }}>
+                经办人：{operator}
+              </Button>
+            </Tooltip>
+          </Space>
         </div>
 
         {unitList.length === 0 ? (
@@ -655,7 +851,7 @@ const QueryPage: React.FC = () => {
                   {Object.entries(unit.materials).map(([mat, count]) => (
                     <Col key={mat}>
                       <Tag color="error" style={{ padding: '4px 12px', fontSize: 13 }}>
-                        缺{mat}：{count}单
+                        缺{mat}：{String(count)}单
                       </Tag>
                     </Col>
                   ))}
@@ -712,16 +908,18 @@ const QueryPage: React.FC = () => {
                     {
                       title: '操作',
                       key: 'action',
-                      width: 100,
+                      width: 140,
                       render: (_: any, r: any) => (
-                        <Button
-                          type="primary"
-                          size="small"
-                          icon={<EyeOutlined />}
-                          onClick={() => handleUrgencyClick(r)}
-                        >
-                          追这月
-                        </Button>
+                        <Space>
+                          <Button
+                            type="primary"
+                            size="small"
+                            icon={<EyeOutlined />}
+                            onClick={() => handleUrgencyClick(r)}
+                          >
+                            追这月
+                          </Button>
+                        </Space>
                       )
                     }
                   ]}
@@ -736,7 +934,14 @@ const QueryPage: React.FC = () => {
 
   return (
     <div className="page-card">
-      <h2 className="page-title">台账查询</h2>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 }}>
+        <h2 className="page-title" style={{ margin: 0 }}>台账查询</h2>
+        <Tooltip title={`当前经办人：${operator}`}>
+          <Button icon={<UserOutlined />} onClick={() => { setOperatorInput(operator); setOperatorModal(true) }}>
+            经办人：{operator}
+          </Button>
+        </Tooltip>
+      </div>
 
       <Tabs
         defaultActiveKey="list"
@@ -902,7 +1107,7 @@ const QueryPage: React.FC = () => {
         }
         open={detailVisible}
         onCancel={() => setDetailVisible(false)}
-        width={820}
+        width={900}
         footer={[
           <Button key="close" onClick={() => setDetailVisible(false)}>
             关闭
@@ -980,6 +1185,30 @@ const QueryPage: React.FC = () => {
               )
             })()}
 
+            {(detailModal.completion_records || []).length > 0 && (
+              <>
+                <Divider orientation="left">
+                  <Space>
+                    <CheckCircleOutlined style={{ color: '#52c41a' }} />
+                    补齐确认记录
+                  </Space>
+                </Divider>
+                <div style={{ padding: '8px 0' }}>
+                  {(detailModal.completion_records || []).map((c: any, i: number) => (
+                  <div key={i} style={{ marginBottom: 6, padding: '6px 10px', background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 4 }}>
+                    <Space>
+                      <Tag color="success">{c.material_name}</Tag>
+                      <span style={{ color: '#389e0d' }}>
+                        <b>{c.operator}</b> 于 {c.completed_at} 确认补齐
+                      </span>
+                      {c.note && <Text type="secondary" style={{ marginLeft: 8 }}>（{c.note}）</Text>}
+                    </Space>
+                  </div>
+                ))}
+                </div>
+              </>
+            )}
+
             {detailAttachments.length > 0 && (
               <>
                 <Divider orientation="left">已归档附件（{detailAttachments.length}个）</Divider>
@@ -998,9 +1227,14 @@ const QueryPage: React.FC = () => {
                         <div style={{ marginTop: 4, paddingLeft: 4 }}>
                           <Space wrap size={4}>
                             {list.map(a => (
-                              <Tag key={a.id} color="blue" icon={<PaperClipOutlined />}>
-                                {a.file_name}
-                              </Tag>
+                              <Tooltip
+                                key={a.id}
+                                title={`上传人：${a.uploaded_by || '-'} · ${a.created_at}`}
+                              >
+                                <Tag color="blue" icon={<PaperClipOutlined />}>
+                                  {a.file_name}
+                                </Tag>
+                              </Tooltip>
                             ))}
                           </Space>
                         </div>
@@ -1010,8 +1244,115 @@ const QueryPage: React.FC = () => {
                 </Row>
               </>
             )}
+
+            <Divider orientation="left">
+              <Space>
+                <ClockCircleOutlined style={{ color: '#1677ff' }} />
+                全流程操作时间线
+              </Space>
+            </Divider>
+            {(detailModal.timeline && detailModal.timeline.length > 0) ? (
+              <div style={{ padding: '8px 4px 8px 12px', maxHeight: 420, overflow: 'auto' }}>
+                <AntdTimeline
+                  mode="left"
+                  items={detailModal.timeline.slice().reverse().map((event: TimelineEvent) => ({
+                    color: getTimelineColor(event.event_type),
+                    dot: getTimelineIcon(event.event_type),
+                    children: (
+                      <div>
+                        <div style={{ fontWeight: 600, marginBottom: 2 }}>
+                          {event.event_name || getTimelineLabel(event.event_type)}
+                          {event.operator && (
+                            <Tag color="blue" style={{ marginLeft: 8, fontSize: 11 }}>
+                              <UserOutlined /> {event.operator}
+                            </Tag>
+                          )}
+                        </div>
+                        <div style={{ color: '#8c8c8c', fontSize: 12, marginBottom: 2 }}>{event.happened_at}</div>
+                        {event.detail && (
+                          <div style={{ fontSize: 13, color: '#595959' }}>{event.detail}</div>
+                        )}
+                      </div>
+                    )
+                  }))}
+                />
+              </div>
+            ) : (
+              <Empty description="暂无操作记录" style={{ padding: '20px 0' }} />
+            )}
           </>
         )}
+      </Modal>
+
+      <Modal
+        title="设置经办人"
+        open={operatorModal}
+        onOk={saveOperator}
+        onCancel={() => setOperatorModal(false)}
+        okText="保存"
+        cancelText="取消"
+      >
+        <Input
+          prefix={<UserOutlined />}
+          placeholder="请输入经办人姓名"
+          value={operatorInput}
+          onChange={(e) => setOperatorInput(e.target.value)}
+          onPressEnter={saveOperator}
+        />
+        <div style={{ marginTop: 8, color: '#8c8c8c', fontSize: 12 }}>
+          所有补齐材料、生成催办单操作均会记录此经办人
+        </div>
+      </Modal>
+
+      <Modal
+        title="生成催办单"
+        open={urgencyExportModal}
+        onCancel={() => setUrgencyExportModal(false)}
+        footer={[
+          <Button key="cancel" onClick={() => setUrgencyExportModal(false)}>取消</Button>,
+          <Button
+            key="text" icon={<CopyOutlined />} onClick={handleCopyUrgencyText}>复制微信文本</Button>,
+          <Button
+            key="xlsx"
+            type="primary"
+            icon={<FileExcelOutlined />}
+            onClick={handleExportUrgencyExcel}
+          >
+            导出 Excel
+          </Button>
+        ]}
+      >
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ marginBottom: 6, fontWeight: 500 }}>选择催办范围（留空表示全部）：</div>
+          <Space direction="vertical" style={{ width: '100%' }}>
+            <Select
+              allowClear
+              placeholder="责任单位（留空=所有单位）"
+              style={{ width: '100%' }}
+              value={urgencyExportUnit || undefined}
+              onChange={(v) => setUrgencyExportUnit(v || '')}
+            >
+              {urgencyUnits.map(u => (
+                <Option key={u} value={u}>{u}</Option>
+              ))}
+            </Select>
+            <Select
+              allowClear
+              placeholder="收文月份（留空=所有月份）"
+              style={{ width: '100%' }}
+              value={urgencyExportMonth || undefined}
+              onChange={(v) => setUrgencyExportMonth(v || '')}
+            >
+              {urgencyMonths.map(m => (
+                <Option key={m} value={m}>{m}</Option>
+              ))}
+            </Select>
+          </Space>
+        </div>
+        <div style={{ marginTop: 8, color: '#8c8c8c', fontSize: 12 }}>
+          · Excel 包含「催办汇总」和「单据明细」两个 Sheet<br />
+          · 微信文本为纯文字格式，可直接复制粘贴发送
+        </div>
       </Modal>
     </div>
   )
