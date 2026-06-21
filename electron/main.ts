@@ -9,6 +9,7 @@ import {
   generateHandoverPackage, generateBatchHandoverPackage, getUrgencyBoard,
   exportRecordsToExcel, exportUrgencyNotice, getRecordById,
   confirmMaterialCompletion, getOperator, setOperator,
+  addHandoverReceipt, updateUrgencyStatus,
   LedgerRecord, Attachment, HandoverBatchOptions
 } from './db'
 
@@ -91,8 +92,8 @@ app.whenReady().then(() => {
     return deleteAttachmentWithFile(id, operator)
   })
 
-  ipcMain.handle('save-and-register-file', async (_e, sourcePath: string, recordNo: string, recordId: number, category: string, operator?: string) => {
-    return saveFileAndAddAttachment(sourcePath, recordNo, recordId, category, operator)
+  ipcMain.handle('save-and-register-file', async (_e, sourcePath: string, recordNo: string, recordId: number, category: string, operator?: string, options?: { asNewVersion?: boolean; versionNote?: string }) => {
+    return saveFileAndAddAttachment(sourcePath, recordNo, recordId, category, operator, options)
   })
 
   ipcMain.handle('save-file-to-directory', async (_e, sourcePath: string, recordNo: string, fileName: string) => {
@@ -207,6 +208,14 @@ app.whenReady().then(() => {
 
   ipcMain.handle('set-operator', (_e, name: string) => {
     return setOperator(name)
+  })
+
+  ipcMain.handle('add-handover-receipt', (_e, recordId: number, receiver: string, receivedAt: string, handoverPath: string, operator: string, opinion?: string) => {
+    return addHandoverReceipt(recordId, receiver, receivedAt, handoverPath, operator, opinion)
+  })
+
+  ipcMain.handle('update-urgency-status', (_e, recordIds: number[], status: string, operator: string, note?: string, proposedBy?: string, month?: string) => {
+    return updateUrgencyStatus(recordIds, status as any, operator, note, proposedBy, month)
   })
 
   createWindow()

@@ -15,8 +15,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   addAttachment: (attachment: any) => ipcRenderer.invoke('add-attachment', attachment),
   deleteAttachmentFile: (id: number, operator?: string) =>
     ipcRenderer.invoke('delete-attachment-file', id, operator),
-  saveAndRegisterFile: (sourcePath: string, recordNo: string, recordId: number, category: string, operator?: string) =>
-    ipcRenderer.invoke('save-and-register-file', sourcePath, recordNo, recordId, category, operator),
+  saveAndRegisterFile: (sourcePath: string, recordNo: string, recordId: number, category: string, operator?: string, options?: { asNewVersion?: boolean; versionNote?: string }) =>
+    ipcRenderer.invoke('save-and-register-file', sourcePath, recordNo, recordId, category, operator, options),
   saveFileToDirectory: (sourcePath: string, recordNo: string, fileName: string) =>
     ipcRenderer.invoke('save-file-to-directory', sourcePath, recordNo, fileName),
   selectFileDialog: () => ipcRenderer.invoke('select-file-dialog'),
@@ -34,5 +34,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   confirmMaterialCompletion: (recordId: number, materials: string[], operator: string, note?: string) =>
     ipcRenderer.invoke('confirm-material-completion', recordId, materials, operator, note),
   getOperator: () => ipcRenderer.invoke('get-operator'),
-  setOperator: (name: string) => ipcRenderer.invoke('set-operator', name)
+  setOperator: (name: string) => ipcRenderer.invoke('set-operator', name),
+  addHandoverReceipt: (recordId: number, receiver: string, receivedAt: string, handoverPath: string, operator: string, opinion?: string) =>
+    ipcRenderer.invoke('add-handover-receipt', recordId, receiver, receivedAt, handoverPath, operator, opinion),
+  updateUrgencyStatus: (recordIds: number[], status: string, operator: string, note?: string, proposedBy?: string, month?: string) =>
+    ipcRenderer.invoke('update-urgency-status', recordIds, status, operator, note, proposedBy, month)
 })

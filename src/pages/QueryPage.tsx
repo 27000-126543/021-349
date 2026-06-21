@@ -49,7 +49,8 @@ import {
   FileDoneOutlined,
   SolutionOutlined,
   EditOutlined,
-  SendOutlined
+  SendOutlined,
+  CheckSquareOutlined
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
 import {
@@ -75,6 +76,9 @@ const getTimelineIcon = (type: string) => {
     case 'settled_change': return <FileExcelOutlined style={{ color: '#722ed1' }} />
     case 'generate_handover': return <FileExcelOutlined style={{ color: '#52c41a' }} />
     case 'complete_material': return <CheckCircleOutlined style={{ color: '#52c41a' }} />
+    case 'handover_receipt': return <SolutionOutlined style={{ color: '#52c41a' }} />
+    case 'urgency_status': return <SendOutlined style={{ color: '#fa8c16' }} />
+    case 'attachment_version': return <FileDoneOutlined style={{ color: '#722ed1' }} />
     default: return <FileOutlined style={{ color: '#8c8c8c' }} />
   }
 }
@@ -88,6 +92,9 @@ const getTimelineColor = (type: string) => {
     case 'settled_change': return 'purple'
     case 'generate_handover': return 'green'
     case 'complete_material': return 'green'
+    case 'handover_receipt': return 'green'
+    case 'urgency_status': return 'orange'
+    case 'attachment_version': return 'purple'
     default: return 'blue'
   }
 }
@@ -102,7 +109,10 @@ const getTimelineLabel = (type: string) => {
     stamped_change: '盖章状态',
     settled_change: '结算状态',
     generate_handover: '生成移交包',
-    complete_material: '材料补齐确认'
+    complete_material: '材料补齐确认',
+    handover_receipt: '移交签收',
+    urgency_status: '催办状态',
+    attachment_version: '附件版本更新'
   }
   return map[type] || type
 }
@@ -136,6 +146,13 @@ const QueryPage: React.FC = () => {
   const [urgencyExportModal, setUrgencyExportModal] = useState(false)
   const [urgencyExportUnit, setUrgencyExportUnit] = useState<string>('')
   const [urgencyExportMonth, setUrgencyExportMonth] = useState<string>('')
+
+  const [urgencyReceiptModal, setUrgencyReceiptModal] = useState(false)
+  const [urgencyReceiptStatus, setUrgencyReceiptStatus] = useState<string>('sent')
+  const [urgencyReceiptNote, setUrgencyReceiptNote] = useState('')
+  const [urgencyReceiptRecordIds, setUrgencyReceiptRecordIds] = useState<number[]>([])
+  const [urgencyReceiptTitle, setUrgencyReceiptTitle] = useState('')
+  const [updatingReceipt, setUpdatingReceipt] = useState(false)
 
   const loadRecords = async () => {
     setLoading(true)
@@ -198,20 +215,17 @@ const QueryPage: React.FC = () => {
   }, [])
 
   useEffect(() => {
-    const fid = sessionStorage.getItem('focusRecordId')
-    if (fid) {
-      sessionStorage.removeItem('focusRecordId')
-      const id = Number(fid)
-      const tryFocus = () => {
-        const r = records.find(x => x.id === id)
-        if (r) {
-          handleViewDetail(r)
-          message.success(`已定位到 ${r.ledger_no} 的详情`)
-        } else if (records.length === 0) {
-          setTimeout(tryFocus, 500)
-        }
+    const fid = localStorage.getItem('queryFocusRecordId')
+    if (!fid) return
+    const id = Number(fid)
+    if (records.length > 0) {
+      const r = records.find(x => x.id === id)
+      if (r) {
+        handleViewDetail(r)
+        localStorage.removeItem('queryFocusRecordId')
+        message.success(`已定位到 ${r.ledger_no} 的详情`)
+        return
       }
-      tryFocus()
     }
   }, [records])
 
@@ -297,6 +311,38 @@ const QueryPage: React.FC = () => {
   const handleBackToUrgency = () => {
     setSelectedUrgency(null)
     setUrgencyRecords([])
+  }
+
+  const openUrgencyReceiptModal = (title: string, recordIds: number[]) => {
+    setUrgencyReceiptTitle(title)
+    setUrgencyReceiptRecordIds(recordIds)
+    setUrgencyReceiptStatus('sent')
+    setUrgencyReceiptNote('')
+    setUrgencyReceiptModal(true)
+  }
+
+  const handleUpdateUrgencyStatus = async () => {
+    if (urgencyReceiptRecordIds.length === 0) {
+      message.warning('没有需要更新的单据')
+      return
+    }
+    setUpdatingReceipt(true)
+    try {
+      await window.electronAPI.updateUrgencyStatus(
+        urgencyReceiptRecordIds,
+        urgencyReceiptStatus as any,
+        operator,
+        urgencyReceiptNote
+      )
+      message.success(`已更新 ${urgencyReceiptRecordIds.length} 条催办状态`)
+      setUrgencyReceiptModal(false)
+      await Promise.all([loadRecords(), loadUrgencyBoard()])
+    } catch (e: any) {
+      console.error(e)
+      message.error(e.message || '更新失败')
+    } finally {
+      setUpdatingReceipt(false)
+    }
   }
 
   const getFlowStatusTag = (status: string) => {
@@ -722,15 +768,44 @@ const QueryPage: React.FC = () => {
               >
                 生成本月催办单
               </Button>
+              <Button
+                type="primary"
+                icon={<CheckSquareOutlined />}
+                onClick={() => {
+                  const ids = urgencyRecords.map((r: any) => r.id)
+                  openUrgencyReceiptModal(`${selectedUrgency.proposed_by} · ${selectedUrgency.month} 催办回执`, ids)
+                }}
+              >
+                登记回执
+              </Button>
             </Space>
           </div>
           <Table
-            columns={commonDetailColumns((r: any) => r.missing_materials || [])}
+            columns={[
+              ...commonDetailColumns((r: any) => r.missing_materials || []),
+              {
+                title: '催办状态',
+                dataIndex: 'urgency_status',
+                key: 'urgency_status',
+                width: 110,
+                render: (v: string) => {
+                  const map: Record<string, { color: string; text: string }> = {
+                    none: { color: 'default', text: '未催办' },
+                    sent: { color: 'blue', text: '已发送' },
+                    replied: { color: 'cyan', text: '已回复' },
+                    submitted: { color: 'green', text: '已补交' },
+                    overdue: { color: 'red', text: '逾期未回' }
+                  }
+                  const s = map[v || 'none']
+                  return <Tag color={s.color}>{s.text}</Tag>
+                }
+              }
+            ]}
             dataSource={urgencyRecords}
             rowKey="id"
             size="small"
             pagination={false}
-            scroll={{ x: 1000 }}
+            scroll={{ x: 1100 }}
           />
         </div>
       )
@@ -906,9 +981,34 @@ const QueryPage: React.FC = () => {
                       }
                     },
                     {
+                      title: '催办状态',
+                      dataIndex: 'urgency_status',
+                      key: 'urgency_status',
+                      width: 110,
+                      render: (_v: any, r: any) => {
+                        const s = r.records || []
+                        const statuses = s.map((rec: any) => rec.urgency_status || 'none')
+                        if (statuses.every((st: string) => st === 'none')) {
+                          return <Tag>未催办</Tag>
+                        }
+                        const sent = statuses.filter((st: string) => st === 'sent').length
+                        const replied = statuses.filter((st: string) => st === 'replied').length
+                        const submitted = statuses.filter((st: string) => st === 'submitted').length
+                        const overdue = statuses.filter((st: string) => st === 'overdue').length
+                        return (
+                          <Space size={4}>
+                            {sent > 0 && <Tag color="blue">已发{sent}</Tag>}
+                            {replied > 0 && <Tag color="cyan">已回{replied}</Tag>}
+                            {submitted > 0 && <Tag color="green">已交{submitted}</Tag>}
+                            {overdue > 0 && <Tag color="red">逾期{overdue}</Tag>}
+                          </Space>
+                        )
+                      }
+                    },
+                    {
                       title: '操作',
                       key: 'action',
-                      width: 140,
+                      width: 180,
                       render: (_: any, r: any) => (
                         <Space>
                           <Button
@@ -919,6 +1019,18 @@ const QueryPage: React.FC = () => {
                           >
                             追这月
                           </Button>
+                          <Popconfirm
+                            title="登记本月催办回执？"
+                            description="将更新该单位该月所有单据的催办状态"
+                            onConfirm={() => {
+                              const ids = (r.records || []).map((rec: any) => rec.id)
+                              openUrgencyReceiptModal(`${r.proposed_by} · ${r.month} 催办回执`, ids)
+                            }}
+                          >
+                            <Button size="small" icon={<CheckSquareOutlined />}>
+                              登记回执
+                            </Button>
+                          </Popconfirm>
                         </Space>
                       )
                     }
@@ -1209,6 +1321,35 @@ const QueryPage: React.FC = () => {
               </>
             )}
 
+            {(detailModal.handover_receipts || []).length > 0 && (
+              <>
+                <Divider orientation="left">
+                  <Space>
+                    <SolutionOutlined style={{ color: '#52c41a' }} />
+                    移交签收记录
+                  </Space>
+                </Divider>
+                <div style={{ padding: '8px 0' }}>
+                  {(detailModal.handover_receipts || []).slice().reverse().map((r: any, i: number) => (
+                    <div key={i} style={{ marginBottom: 6, padding: '8px 12px', background: '#f6ffed', border: '1px solid #b7eb8f', borderRadius: 4 }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 2 }}>
+                        <Space>
+                          <b>签收人：{r.receiver}</b>
+                          <Tag color="green">
+                            <UserOutlined /> 登记人：{r.operator}
+                          </Tag>
+                        </Space>
+                        <span style={{ color: '#8c8c8c', fontSize: 12 }}>{r.received_at}</span>
+                      </div>
+                      {r.receipt_opinion && (
+                        <div style={{ fontSize: 12, color: '#595959' }}>签收意见：{r.receipt_opinion}</div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+
             {detailAttachments.length > 0 && (
               <>
                 <Divider orientation="left">已归档附件（{detailAttachments.length}个）</Divider>
@@ -1229,10 +1370,12 @@ const QueryPage: React.FC = () => {
                             {list.map(a => (
                               <Tooltip
                                 key={a.id}
-                                title={`上传人：${a.uploaded_by || '-'} · ${a.created_at}`}
+                                title={`上传人：${a.uploaded_by || '-'} · ${a.created_at}${a.version_note ? '\n版本说明：' + a.version_note : ''}`}
                               >
-                                <Tag color="blue" icon={<PaperClipOutlined />}>
+                                <Tag color={a.is_current !== false ? 'blue' : 'default'} icon={<PaperClipOutlined />}>
                                   {a.file_name}
+                                  {a.version && a.version > 1 && <span style={{ marginLeft: 4, fontWeight: 600 }}>v{a.version}</span>}
+                                  {a.is_current === false && <span style={{ marginLeft: 4, opacity: 0.7 }}>（历史）</span>}
                                 </Tag>
                               </Tooltip>
                             ))}
@@ -1352,6 +1495,46 @@ const QueryPage: React.FC = () => {
         <div style={{ marginTop: 8, color: '#8c8c8c', fontSize: 12 }}>
           · Excel 包含「催办汇总」和「单据明细」两个 Sheet<br />
           · 微信文本为纯文字格式，可直接复制粘贴发送
+        </div>
+      </Modal>
+
+      <Modal
+        title={`登记催办回执 - ${urgencyReceiptTitle}`}
+        open={urgencyReceiptModal}
+        onOk={handleUpdateUrgencyStatus}
+        onCancel={() => setUrgencyReceiptModal(false)}
+        confirmLoading={updatingReceipt}
+        okText="确认登记"
+        cancelText="取消"
+        width={480}
+      >
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ marginBottom: 6, fontWeight: 500 }}>回执状态：</div>
+          <Radio.Group
+            value={urgencyReceiptStatus}
+            onChange={(e) => setUrgencyReceiptStatus(e.target.value)}
+            style={{ width: '100%' }}
+          >
+            <Space direction="vertical" style={{ width: '100%' }}>
+              <Radio value="sent">📤 已发送（催办单已发出）</Radio>
+              <Radio value="replied">💬 已回复（对方已答复）</Radio>
+              <Radio value="submitted">📥 已补交（资料已补齐）</Radio>
+              <Radio value="overdue">⏰ 逾期未回（超期未反馈）</Radio>
+            </Space>
+          </Radio.Group>
+        </div>
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ marginBottom: 6, fontWeight: 500 }}>备注说明（可选）：</div>
+          <Input.TextArea
+            rows={3}
+            value={urgencyReceiptNote}
+            onChange={(e) => setUrgencyReceiptNote(e.target.value)}
+            placeholder="例如：对方承诺下周三前补齐"
+          />
+        </div>
+        <div style={{ color: '#8c8c8c', fontSize: 12 }}>
+          共 <b style={{ color: '#1677ff' }}>{urgencyReceiptRecordIds.length}</b> 条单据将被更新
+          <span style={{ marginLeft: 16 }}>登记人：<b style={{ color: '#1677ff' }}>{operator}</b></span>
         </div>
       </Modal>
     </div>

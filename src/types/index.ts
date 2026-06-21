@@ -1,6 +1,7 @@
 export interface TimelineEvent {
   event_type: 'register' | 'upload_attachment' | 'delete_attachment' | 'status_change'
     | 'generate_handover' | 'complete_material' | 'stamped_change' | 'settled_change' | 'edit'
+    | 'handover_receipt' | 'urgency_status' | 'attachment_version'
   event_name: string
   operator: string
   happened_at: string
@@ -10,6 +11,8 @@ export interface TimelineEvent {
   handover_path?: string
   old_value?: string
   new_value?: string
+  receipt_info?: { receiver: string; opinion?: string }
+  urgency_status?: string
 }
 
 export interface CompletionRecord {
@@ -18,6 +21,27 @@ export interface CompletionRecord {
   operator: string
   attachment_ids?: number[]
   note?: string
+}
+
+export interface HandoverReceipt {
+  id?: number
+  record_id: number
+  handover_path: string
+  receiver: string
+  received_at: string
+  receipt_opinion?: string
+  operator: string
+  batch_id?: string
+}
+
+export type UrgencyStatusType = 'none' | 'sent' | 'replied' | 'submitted' | 'overdue'
+
+export const URGENCY_STATUS_MAP: Record<UrgencyStatusType, { label: string; color: string }> = {
+  none: { label: '未催办', color: 'default' },
+  sent: { label: '已发送', color: 'blue' },
+  replied: { label: '已回复', color: 'orange' },
+  submitted: { label: '已补交', color: 'success' },
+  overdue: { label: '逾期未回', color: 'error' }
 }
 
 export interface LedgerRecord {
@@ -39,7 +63,10 @@ export interface LedgerRecord {
   updated_at?: string
   timeline?: TimelineEvent[]
   completion_records?: CompletionRecord[]
+  handover_receipts?: HandoverReceipt[]
   last_operator?: string
+  urgency_status?: UrgencyStatusType
+  urgency_updated_at?: string
 }
 
 export interface Attachment {
@@ -52,6 +79,10 @@ export interface Attachment {
   category: string
   uploaded_by?: string
   created_at?: string
+  version?: number
+  parent_id?: number
+  is_current?: boolean
+  version_note?: string
 }
 
 export interface UrgencyNoticeItem {
@@ -169,7 +200,7 @@ declare global {
       getAttachments: (recordId: number) => Promise<Attachment[]>
       addAttachment: (attachment: Attachment) => Promise<number>
       deleteAttachmentFile: (id: number, operator?: string) => Promise<boolean>
-      saveAndRegisterFile: (sourcePath: string, recordNo: string, recordId: number, category: string, operator?: string) => Promise<Attachment | null>
+      saveAndRegisterFile: (sourcePath: string, recordNo: string, recordId: number, category: string, operator?: string, options?: { asNewVersion?: boolean; versionNote?: string }) => Promise<Attachment | null>
       saveFileToDirectory: (sourcePath: string, recordNo: string, fileName: string) => Promise<string>
       selectFileDialog: () => Promise<{ canceled: boolean; filePaths: string[] }>
       openFolder: (folderPath: string) => Promise<boolean>
@@ -183,6 +214,8 @@ declare global {
       confirmMaterialCompletion: (recordId: number, materials: string[], operator: string, note?: string) => Promise<boolean>
       getOperator: () => Promise<string>
       setOperator: (name: string) => Promise<boolean>
+      addHandoverReceipt: (recordId: number, receiver: string, receivedAt: string, handoverPath: string, operator: string, opinion?: string) => Promise<boolean>
+      updateUrgencyStatus: (recordIds: number[], status: UrgencyStatusType, operator: string, note?: string, proposedBy?: string, month?: string) => Promise<boolean>
     }
   }
 }

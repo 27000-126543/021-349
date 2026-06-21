@@ -2,12 +2,13 @@ import * as fs from 'fs'
 import * as path from 'path'
 import dayjs from 'dayjs'
 import * as XLSX from 'xlsx'
-import { HandoverBatchOptions } from '../src/types'
-export type { HandoverBatchOptions }
+import { HandoverBatchOptions, UrgencyStatusType } from '../src/types'
+export type { HandoverBatchOptions, UrgencyStatusType }
 
 export interface TimelineEvent {
   event_type: 'register' | 'upload_attachment' | 'delete_attachment' | 'status_change'
     | 'generate_handover' | 'complete_material' | 'stamped_change' | 'settled_change' | 'edit'
+    | 'handover_receipt' | 'urgency_status' | 'attachment_version'
   event_name: string
   operator: string
   happened_at: string
@@ -17,6 +18,8 @@ export interface TimelineEvent {
   handover_path?: string
   old_value?: string
   new_value?: string
+  receipt_info?: { receiver: string; opinion?: string }
+  urgency_status?: string
 }
 
 export interface CompletionRecord {
@@ -25,6 +28,17 @@ export interface CompletionRecord {
   operator: string
   attachment_ids?: number[]
   note?: string
+}
+
+export interface HandoverReceipt {
+  id?: number
+  record_id: number
+  handover_path: string
+  receiver: string
+  received_at: string
+  receipt_opinion?: string
+  operator: string
+  batch_id?: string
 }
 
 export interface LedgerRecord {
@@ -46,7 +60,10 @@ export interface LedgerRecord {
   updated_at?: string
   timeline?: TimelineEvent[]
   completion_records?: CompletionRecord[]
+  handover_receipts?: HandoverReceipt[]
   last_operator?: string
+  urgency_status?: UrgencyStatusType
+  urgency_updated_at?: string
 }
 
 export interface Attachment {
@@ -59,6 +76,10 @@ export interface Attachment {
   category: string
   uploaded_by?: string
   created_at?: string
+  version?: number
+  parent_id?: number
+  is_current?: boolean
+  version_note?: string
 }
 
 interface DatabaseData {
@@ -66,6 +87,7 @@ interface DatabaseData {
   attachments: Attachment[]
   nextRecordId: number
   nextAttachmentId: number
+  nextReceiptId: number
   settings: { operator?: string }
 }
 
@@ -81,6 +103,7 @@ function defaultData(): DatabaseData {
     attachments: [],
     nextRecordId: 1,
     nextAttachmentId: 1,
+    nextReceiptId: 1,
     settings: { operator: DEFAULT_OPERATOR }
   }
 }
@@ -102,6 +125,10 @@ function migrateData(): void {
     data.settings = { operator: DEFAULT_OPERATOR }
     changed = true
   }
+  if (typeof data.nextReceiptId !== 'number') {
+    data.nextReceiptId = 1
+    changed = true
+  }
   for (const r of data.records) {
     if (!r.timeline) {
       r.timeline = [{
@@ -117,6 +144,15 @@ function migrateData(): void {
       r.completion_records = []
       changed = true
     }
+    if (!r.handover_receipts) {
+      r.handover_receipts = []
+      changed = true
+    }
+    if (!r.urgency_status) {
+      r.urgency_status = 'none'
+      r.urgency_updated_at = ''
+      changed = true
+    }
   }
   for (const att of data.attachments) {
     if (!att.category) {
@@ -125,6 +161,12 @@ function migrateData(): void {
     }
     if (!att.uploaded_by) {
       att.uploaded_by = DEFAULT_OPERATOR
+      changed = true
+    }
+    if (typeof att.version !== 'number') {
+      att.version = 1
+      att.is_current = true
+      att.parent_id = 0
       changed = true
     }
   }
@@ -455,7 +497,8 @@ export function saveFileAndAddAttachment(
   recordNo: string,
   recordId: number,
   category: string,
-  operator?: string
+  operator?: string,
+  options?: { asNewVersion?: boolean; versionNote?: string }
 ): Attachment | null {
   try {
     const userDataDir = path.dirname(dbPath)
@@ -474,6 +517,21 @@ export function saveFileAndAddAttachment(
     const id = data.nextAttachmentId
     const now = dayjs().format('YYYY-MM-DD HH:mm:ss')
     const op = operator || data.settings?.operator || DEFAULT_OPERATOR
+    const cat = category || guessCategory(basename, ext)
+
+    let version = 1
+    let parentId = 0
+    if (options?.asNewVersion) {
+      const existingSameCat = data.attachments.filter(a => a.record_id === recordId && a.category === cat)
+      if (existingSameCat.length > 0) {
+        const maxVer = Math.max(...existingSameCat.map(a => a.version || 1))
+        version = maxVer + 1
+        const latestCurrent = existingSameCat.find(a => a.is_current)
+        if (latestCurrent) parentId = latestCurrent.id || 0
+        existingSameCat.forEach(a => { a.is_current = false })
+      }
+    }
+
     const newAtt: Attachment = {
       id,
       record_id: recordId,
@@ -481,9 +539,13 @@ export function saveFileAndAddAttachment(
       file_path: targetPath,
       file_size: stats.size,
       file_type: ext,
-      category: category || guessCategory(basename, ext),
+      category: cat,
       uploaded_by: op,
-      created_at: now
+      created_at: now,
+      version,
+      parent_id: parentId,
+      is_current: true,
+      version_note: options?.versionNote || ''
     }
     data.attachments.push(newAtt)
     data.nextAttachmentId = id + 1
@@ -492,14 +554,25 @@ export function saveFileAndAddAttachment(
     if (recIdx !== -1) {
       const rec = data.records[recIdx]
       if (!rec.timeline) rec.timeline = []
-      rec.timeline.push({
-        event_type: 'upload_attachment',
-        event_name: `上传附件（${newAtt.category}）`,
-        operator: op,
-        happened_at: now,
-        attachment_id: id,
-        detail: `${newAtt.file_name}（${(newAtt.file_size / 1024).toFixed(1)}KB）`
-      })
+      if (options?.asNewVersion && version > 1) {
+        rec.timeline.push({
+          event_type: 'attachment_version',
+          event_name: `上传新版附件（${cat}）`,
+          operator: op,
+          happened_at: now,
+          attachment_id: id,
+          detail: `版本 v${version}：${newAtt.file_name}${options.versionNote ? `（${options.versionNote}）` : ''}`
+        })
+      } else {
+        rec.timeline.push({
+          event_type: 'upload_attachment',
+          event_name: `上传附件（${newAtt.category}）`,
+          operator: op,
+          happened_at: now,
+          attachment_id: id,
+          detail: `${newAtt.file_name}（${(newAtt.file_size / 1024).toFixed(1)}KB）`
+        })
+      }
       rec.updated_at = now
       rec.last_operator = op
     }
@@ -629,6 +702,90 @@ export function confirmMaterialCompletion(
   rec.last_operator = op
   saveData(data)
   return true
+}
+
+export function addHandoverReceipt(
+  recordId: number,
+  receiver: string,
+  receivedAt: string,
+  handoverPath: string,
+  operator: string,
+  opinion?: string
+): boolean {
+  const data = loadData()
+  const recIdx = data.records.findIndex(r => r.id === recordId)
+  if (recIdx === -1) return false
+  const rec = data.records[recIdx]
+  if (!rec.handover_receipts) rec.handover_receipts = []
+  if (!rec.timeline) rec.timeline = []
+  const op = operator || data.settings?.operator || DEFAULT_OPERATOR
+  const now = dayjs().format('YYYY-MM-DD HH:mm:ss')
+  const receipt: HandoverReceipt = {
+    id: data.nextReceiptId,
+    record_id: recordId,
+    handover_path: handoverPath,
+    receiver,
+    received_at: receivedAt,
+    receipt_opinion: opinion,
+    operator: op
+  }
+  rec.handover_receipts.push(receipt)
+  data.nextReceiptId += 1
+  rec.timeline.push({
+    event_type: 'handover_receipt',
+    event_name: '资料签收确认',
+    operator: op,
+    happened_at: now,
+    handover_path: handoverPath,
+    receipt_info: { receiver, opinion },
+    detail: `签收人：${receiver}${opinion ? `（${opinion}）` : ''}`
+  })
+  rec.updated_at = now
+  rec.last_operator = op
+  saveData(data)
+  return true
+}
+
+export function updateUrgencyStatus(
+  recordIds: number[],
+  status: UrgencyStatusType,
+  operator: string,
+  note?: string,
+  proposedBy?: string,
+  month?: string
+): boolean {
+  const data = loadData()
+  const op = operator || data.settings?.operator || DEFAULT_OPERATOR
+  const now = dayjs().format('YYYY-MM-DD HH:mm:ss')
+  const statusLabel: Record<string, string> = {
+    none: '未催办',
+    sent: '已发送',
+    replied: '已回复',
+    submitted: '已补交',
+    overdue: '逾期未回'
+  }
+  let count = 0
+  for (const id of recordIds) {
+    const idx = data.records.findIndex(r => r.id === id)
+    if (idx === -1) continue
+    const rec = data.records[idx]
+    if (!rec.timeline) rec.timeline = []
+    rec.urgency_status = status
+    rec.urgency_updated_at = now
+    rec.timeline.push({
+      event_type: 'urgency_status',
+      event_name: `催办状态：${statusLabel[status] || status}`,
+      operator: op,
+      happened_at: now,
+      urgency_status: status,
+      detail: note || `状态变更为${statusLabel[status] || status}`
+    })
+    rec.updated_at = now
+    rec.last_operator = op
+    count++
+  }
+  if (count > 0) saveData(data)
+  return count > 0
 }
 
 function buildSinglePackageContent(
@@ -858,13 +1015,13 @@ export function generateBatchHandoverPackage(
     }
 
     const summaryRows: any[][] = [
-      ['批量移交汇总清单', '', '', '', '', '', '', ''],
-      ['生成时间', dayjs().format('YYYY-MM-DD HH:mm:ss'), '', '', '', '', '', ''],
-      ['生成人', op, '', '', '', '', '', ''],
-      ['分组方式', options.groupBy === 'proposed_by' ? '按责任单位' : options.groupBy === 'month' ? '按收文月份' : '不分组', '', '', '', '', '', ''],
-      ['单据总数', records.length, '', '', '', '', '', ''],
-      ['', '', '', '', '', '', '', ''],
-      ['分组', '台账编号', '单据类型', '工程名称', '专业', '责任单位', '附件数', '待补材料数', '缺失项']
+      ['批量移交汇总清单', '', '', '', '', '', '', '', '', '', '', ''],
+      ['生成时间', dayjs().format('YYYY-MM-DD HH:mm:ss'), '', '', '', '', '', '', '', '', '', ''],
+      ['生成人', op, '', '', '', '', '', '', '', '', '', ''],
+      ['分组方式', options.groupBy === 'proposed_by' ? '按责任单位' : options.groupBy === 'month' ? '按收文月份' : '不分组', '', '', '', '', '', '', '', '', '', ''],
+      ['单据总数', records.length, '', '', '', '', '', '', '', '', '', ''],
+      ['', '', '', '', '', '', '', '', '', '', '', ''],
+      ['分组', '台账编号', '单据类型', '工程名称', '专业', '责任单位', '附件数', '待补材料数', '补齐项数', '签收次数', '最近签收人', '催办状态']
     ]
     let overallCopied = 0
     let overallMissing = 0
@@ -889,7 +1046,12 @@ export function generateBatchHandoverPackage(
           r.proposed_by || '-',
           result.copied.length,
           result.missing.length,
-          result.missing.join('、') || '齐全'
+          (r.completion_records || []).length,
+          (r.handover_receipts || []).length,
+          (r.handover_receipts || []).length > 0
+            ? r.handover_receipts![r.handover_receipts!.length - 1].receiver
+            : '',
+          urgencyStatusLabel(r.urgency_status || 'none')
         ])
         perRecordManifest.push({
           ledger_no: r.ledger_no,
@@ -918,13 +1080,14 @@ export function generateBatchHandoverPackage(
     saveData(data)
 
     summaryRows.push(
-      ['', '', '', '', '', '', '', ''],
-      ['合计', '', '', '', '', '', overallCopied, overallMissing, '']
+      ['', '', '', '', '', '', '', '', '', '', '', ''],
+      ['合计', '', '', '', '', '', overallCopied, overallMissing, '', '', '', '']
     )
     const ws = XLSX.utils.aoa_to_sheet(summaryRows)
     ws['!cols'] = [
       { wch: 14 }, { wch: 20 }, { wch: 10 }, { wch: 20 }, { wch: 8 },
-      { wch: 12 }, { wch: 8 }, { wch: 10 }, { wch: 28 }
+      { wch: 12 }, { wch: 8 }, { wch: 10 }, { wch: 10 }, { wch: 10 },
+      { wch: 12 }, { wch: 12 }
     ]
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, '总清单')
@@ -988,6 +1151,17 @@ export function generateBatchHandoverPackage(
   }
 }
 
+function urgencyStatusLabel(status: string): string {
+  const map: Record<string, string> = {
+    none: '未催办',
+    sent: '已发送',
+    replied: '已回复',
+    submitted: '已补交',
+    overdue: '逾期未回'
+  }
+  return map[status] || status
+}
+
 function getMaterialDescription(key: string): string {
   const map: Record<string, string> = {
     '盖章件': '需要建设/设计/监理三方盖章的设计变更扫描件',
@@ -1006,7 +1180,8 @@ export function exportRecordsToExcel(records: LedgerRecord[], defaultName: strin
     const headerRow = [
       '台账编号', '单据类型', '工程名称', '楼栋部位', '涉及专业', '提出单位',
       '预计费用影响(元)', '流转状态', '收文日期', '盖章状态', '结算状态',
-      '缺失材料', '附件数量', '附件分类统计', '最近经办人', '补齐材料数'
+      '缺失材料', '附件数量', '附件分类统计', '最近经办人', '补齐材料数',
+      '催办状态', '签收次数', '最近签收人', '最近签收时间'
     ]
     const dataRows: any[][] = records.map(r => {
       const atts = attsBatch[r.id!] || []
@@ -1029,14 +1204,23 @@ export function exportRecordsToExcel(records: LedgerRecord[], defaultName: strin
         atts.length,
         Object.entries(catCount).map(([k, v]) => `${k}${v}`).join(' / ') || '无',
         r.last_operator || DEFAULT_OPERATOR,
-        (r.completion_records || []).length
+        (r.completion_records || []).length,
+        urgencyStatusLabel(r.urgency_status || 'none'),
+        (r.handover_receipts || []).length,
+        (r.handover_receipts || []).length > 0
+          ? r.handover_receipts![r.handover_receipts!.length - 1].receiver
+          : '',
+        (r.handover_receipts || []).length > 0
+          ? r.handover_receipts![r.handover_receipts!.length - 1].received_at
+          : ''
       ]
     })
     const ws = XLSX.utils.aoa_to_sheet([headerRow, ...dataRows])
     ws['!cols'] = [
       { wch: 20 }, { wch: 10 }, { wch: 20 }, { wch: 14 }, { wch: 8 }, { wch: 10 },
       { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 8 }, { wch: 8 },
-      { wch: 20 }, { wch: 8 }, { wch: 24 }, { wch: 12 }, { wch: 12 }
+      { wch: 20 }, { wch: 8 }, { wch: 24 }, { wch: 12 }, { wch: 12 },
+      { wch: 10 }, { wch: 10 }, { wch: 12 }, { wch: 20 }
     ]
     const wb = XLSX.utils.book_new()
     XLSX.utils.book_append_sheet(wb, ws, '台账清单')

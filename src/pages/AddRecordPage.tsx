@@ -176,7 +176,7 @@ const AddRecordPage: React.FC = () => {
 
   const goUploadAttachment = () => {
     if (successModal.record) {
-      sessionStorage.setItem('selectedRecordId', String(successModal.id))
+      localStorage.setItem('attachmentSelectedRecordId', String(successModal.id))
     }
     setSuccessModal({ open: false, record: null, id: 0 })
     navigate('/attachment')
@@ -184,7 +184,7 @@ const AddRecordPage: React.FC = () => {
 
   const goViewDetail = () => {
     if (successModal.record) {
-      sessionStorage.setItem('focusRecordId', String(successModal.id))
+      localStorage.setItem('queryFocusRecordId', String(successModal.id))
     }
     setSuccessModal({ open: false, record: null, id: 0 })
     navigate('/query')

@@ -47,6 +47,7 @@ import {
   LedgerRecord, Attachment, ATTACHMENT_CATEGORIES, CATEGORY_COLOR_MAP,
   getMissingMaterials, DEFAULT_OPERATOR, HandoverBatchOptions
 } from '../types'
+import dayjs from 'dayjs'
 
 const { Option } = Select
 const { Paragraph } = Typography
@@ -93,6 +94,16 @@ const AttachmentPage: React.FC = () => {
   const [completionNote, setCompletionNote] = useState('')
   const [completing, setCompleting] = useState(false)
 
+  const [asNewVersion, setAsNewVersion] = useState(false)
+  const [versionNote, setVersionNote] = useState('')
+
+  const [receiptModal, setReceiptModal] = useState(false)
+  const [receiptReceiver, setReceiptReceiver] = useState('')
+  const [receiptDate, setReceiptDate] = useState(dayjs().format('YYYY-MM-DD HH:mm:ss'))
+  const [receiptOpinion, setReceiptOpinion] = useState('')
+  const [registeringReceipt, setRegisteringReceipt] = useState(false)
+  const [lastHandoverPath, setLastHandoverPath] = useState('')
+
   useEffect(() => {
     loadRecords()
     loadPaths()
@@ -100,20 +111,17 @@ const AttachmentPage: React.FC = () => {
   }, [])
 
   useEffect(() => {
-    const sid = sessionStorage.getItem('selectedRecordId')
-    if (sid) {
-      sessionStorage.removeItem('selectedRecordId')
-      const id = Number(sid)
-      const doSelect = () => {
-        const rec = records.find(r => r.id === id)
-        if (rec) {
-          handleSelectRecord(id)
-          message.success(`已定位到 ${rec.ledger_no}，可直接上传附件或补齐材料`)
-        } else if (records.length === 0) {
-          setTimeout(doSelect, 300)
-        }
+    const sid = localStorage.getItem('attachmentSelectedRecordId')
+    if (!sid) return
+    const id = Number(sid)
+    if (records.length > 0) {
+      const rec = records.find(r => r.id === id)
+      if (rec) {
+        handleSelectRecord(id)
+        localStorage.removeItem('attachmentSelectedRecordId')
+        message.success(`已定位到 ${rec.ledger_no}，可直接上传附件或补齐材料`)
+        return
       }
-      doSelect()
     }
   }, [records])
 
@@ -199,7 +207,8 @@ const AttachmentPage: React.FC = () => {
           selectedRecord.ledger_no,
           selectedRecordId,
           uploadCategory,
-          operator
+          operator,
+          { asNewVersion, versionNote: versionNote || undefined }
         )
         if (result) successCount++
         else failCount++
@@ -211,11 +220,12 @@ const AttachmentPage: React.FC = () => {
 
     setUploading(false)
     if (successCount > 0) {
-      message.success(`成功归档 ${successCount} 个文件到「${uploadCategory}」`)
+      message.success(`成功归档 ${successCount} 个文件到「${uploadCategory}」${asNewVersion ? '（新版本）' : ''}`)
       await loadAttachments(selectedRecordId)
       await loadRecords()
       const rec = records.find(r => r.id === selectedRecordId)
       if (rec) setSelectedRecord({ ...rec })
+      setVersionNote('')
     }
     if (failCount > 0) {
       message.error(`${failCount} 个文件归档失败`)
@@ -325,13 +335,13 @@ const AttachmentPage: React.FC = () => {
   const missingMaterials = selectedRecord ? getMissingMaterials(selectedRecord, attachments) : []
   const previousMissingRef = useRef<string[]>([])
   const existingCompletions = (selectedRecord?.completion_records || []).map(c => c.material_name)
-  const newCompletions = missingMaterials.length === 0 && previousMissingRef.current.length > 0
-    ? previousMissingRef.current.filter(m => !existingCompletions.includes(m))
-    : []
+  const newlyCompleted = previousMissingRef.current.filter(m =>
+    !missingMaterials.includes(m) && !existingCompletions.includes(m)
+  )
 
   useEffect(() => {
-    if (selectedRecord && newCompletions.length > 0 && !completionModal) {
-      setCompletionMaterials(newCompletions)
+    if (selectedRecord && newlyCompleted.length > 0 && !completionModal) {
+      setCompletionMaterials(newlyCompleted)
       setCompletionNote('')
       setCompletionModal(true)
     }
@@ -357,6 +367,44 @@ const AttachmentPage: React.FC = () => {
       message.error('确认失败')
     } finally {
       setCompleting(false)
+    }
+  }
+
+  const handleOpenReceiptModal = () => {
+    if (!selectedRecord) return
+    setReceiptReceiver('')
+    setReceiptDate(dayjs().format('YYYY-MM-DD HH:mm:ss'))
+    setReceiptOpinion('')
+    const receipts = selectedRecord.handover_receipts || []
+    if (receipts.length > 0) {
+      setLastHandoverPath(receipts[receipts.length - 1].handover_path)
+    }
+    setReceiptModal(true)
+  }
+
+  const handleRegisterReceipt = async () => {
+    if (!selectedRecordId || !receiptReceiver.trim()) {
+      message.warning('请填写签收人')
+      return
+    }
+    try {
+      setRegisteringReceipt(true)
+      const ok = await window.electronAPI.addHandoverReceipt(
+        selectedRecordId, receiptReceiver.trim(), receiptDate,
+        lastHandoverPath || '', operator, receiptOpinion || undefined
+      )
+      if (ok) {
+        message.success('签收已登记')
+        setReceiptModal(false)
+        await loadRecords()
+        const rec = records.find(r => r.id === selectedRecordId)
+        if (rec) setSelectedRecord({ ...rec })
+      }
+    } catch (e) {
+      console.error(e)
+      message.error('登记失败')
+    } finally {
+      setRegisteringReceipt(false)
     }
   }
 
@@ -591,6 +639,20 @@ const AttachmentPage: React.FC = () => {
                     ))}
                   </Select>
                 </div>
+                <div style={{ marginTop: 8, width: '80%', textAlign: 'left' }} onClick={(e) => e.stopPropagation()}>
+                  <Checkbox checked={asNewVersion} onChange={(e) => setAsNewVersion(e.target.checked)}>
+                    作为新版本上传（旧版保留）
+                  </Checkbox>
+                  {asNewVersion && (
+                    <Input
+                      size="small"
+                      placeholder="版本说明（可选）"
+                      value={versionNote}
+                      onChange={(e) => setVersionNote(e.target.value)}
+                      style={{ marginTop: 6 }}
+                    />
+                  )}
+                </div>
                 <Button
                   type="primary"
                   icon={<UploadOutlined />}
@@ -642,6 +704,13 @@ const AttachmentPage: React.FC = () => {
                         生成移交包
                       </Button>
                     </Tooltip>
+                    <Button
+                      icon={<SolutionOutlined />}
+                      onClick={handleOpenReceiptModal}
+                      disabled={!selectedRecord}
+                    >
+                      登记签收
+                    </Button>
                   </Space>
                 </div>
               </Card>
@@ -712,6 +781,49 @@ const AttachmentPage: React.FC = () => {
                   </div>
                 )}
               </Card>
+
+              {(selectedRecord.handover_receipts || []).length > 0 && (
+                <Card
+                  title={
+                    <Space>
+                      <SolutionOutlined style={{ color: '#52c41a' }} />
+                      <span>移交签收记录</span>
+                      <Tag color="success">{(selectedRecord.handover_receipts || []).length} 次</Tag>
+                    </Space>
+                  }
+                  size="small"
+                  style={{ marginBottom: 12 }}
+                  bodyStyle={{ padding: 12 }}
+                >
+                  {(selectedRecord.handover_receipts || []).slice().reverse().map((r: any, i: number) => (
+                    <div
+                      key={i}
+                      style={{
+                        padding: '8px 12px',
+                        background: '#f6ffed',
+                        border: '1px solid #b7eb8f',
+                        borderRadius: 4,
+                        marginBottom: 8
+                      }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
+                        <Space>
+                          <b>签收人：{r.receiver}</b>
+                          <Tag color="green">
+                            <UserOutlined /> 登记人：{r.operator}
+                          </Tag>
+                        </Space>
+                        <span style={{ color: '#8c8c8c', fontSize: 12 }}>{r.received_at}</span>
+                      </div>
+                      {r.receipt_opinion && (
+                        <div style={{ marginTop: 4, fontSize: 12, color: '#595959' }}>
+                          签收意见：{r.receipt_opinion}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </Card>
+              )}
 
               <Card
                 title={
@@ -799,6 +911,18 @@ const AttachmentPage: React.FC = () => {
                                       <span>
                                         {item.file_name}
                                         <Tag style={{ marginLeft: 8 }}>{item.file_type?.toUpperCase() || 'FILE'}</Tag>
+                                        {item.version && item.version > 1 && (
+                                          <Tag color="purple" style={{ marginLeft: 4 }}>v{item.version}</Tag>
+                                        )}
+                                        {item.is_current !== false && (
+                                          <Tag color="success" style={{ marginLeft: 4 }}>最新版</Tag>
+                                        )}
+                                        {item.is_current === false && (
+                                          <Tag color="default" style={{ marginLeft: 4 }}>历史版本</Tag>
+                                        )}
+                                        {item.version_note && (
+                                          <Tag color="geekblue" style={{ marginLeft: 4 }}>{item.version_note}</Tag>
+                                        )}
                                       </span>
                                     }
                                     description={
@@ -909,6 +1033,45 @@ const AttachmentPage: React.FC = () => {
           · 根目录下包含总移交清单.xlsx（含所有单据和补齐情况）+ README.txt<br />
           · 经办人：<b style={{ color: '#1677ff' }}>{operator}</b>
         </Paragraph>
+      </Modal>
+
+      <Modal
+        title="登记移交签收"
+        open={receiptModal}
+        onOk={handleRegisterReceipt}
+        onCancel={() => setReceiptModal(false)}
+        confirmLoading={registeringReceipt}
+        okText="确认签收"
+        cancelText="取消"
+      >
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 6, fontWeight: 500 }}>签收人：</div>
+          <Input
+            placeholder="请输入档案员/接收人姓名"
+            value={receiptReceiver}
+            onChange={(e) => setReceiptReceiver(e.target.value)}
+          />
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 6, fontWeight: 500 }}>签收时间：</div>
+          <Input
+            value={receiptDate}
+            onChange={(e) => setReceiptDate(e.target.value)}
+            placeholder="YYYY-MM-DD HH:mm:ss"
+          />
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 6, fontWeight: 500 }}>签收意见（可选）：</div>
+          <Input.TextArea
+            rows={3}
+            value={receiptOpinion}
+            onChange={(e) => setReceiptOpinion(e.target.value)}
+            placeholder="例如：资料齐全、无误"
+          />
+        </div>
+        <div style={{ color: '#8c8c8c', fontSize: 12 }}>
+          登记人：<b style={{ color: '#1677ff' }}>{operator}</b>
+        </div>
       </Modal>
     </div>
   )
