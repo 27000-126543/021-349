@@ -1,10 +1,12 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
 import * as path from 'path'
 import * as fs from 'fs'
 import {
   initDatabase, getAllRecords, addRecord, updateRecord, deleteRecord,
   searchRecords, getAllAttachments, addAttachment, deleteAttachment,
-  generateLedgerNo, LedgerRecord, Attachment
+  generateLedgerNo, getMonthlySummary, getAttachmentCounts,
+  saveFileAndAddAttachment, deleteAttachmentWithFile,
+  LedgerRecord, Attachment
 } from './db'
 
 let mainWindow: BrowserWindow | null = null
@@ -81,20 +83,15 @@ app.whenReady().then(() => {
     return addAttachment(attachment)
   })
 
-  ipcMain.handle('delete-attachment-file', async (_e, id: number, filePath: string) => {
-    const result = deleteAttachment(id)
-    if (result && fs.existsSync(filePath)) {
-      try {
-        fs.unlinkSync(filePath)
-      } catch (e) {
-        console.error('删除文件失败:', e)
-      }
-    }
-    return result
+  ipcMain.handle('delete-attachment-file', async (_e, id: number) => {
+    return deleteAttachmentWithFile(id)
+  })
+
+  ipcMain.handle('save-and-register-file', async (_e, sourcePath: string, recordNo: string, recordId: number, category: string) => {
+    return saveFileAndAddAttachment(sourcePath, recordNo, recordId, category)
   })
 
   ipcMain.handle('save-file-to-directory', async (_e, sourcePath: string, recordNo: string, fileName: string) => {
-    const userDataPath = app.getPath('userData')
     const targetDir = path.join(userDataPath, 'attachments', recordNo)
     if (!fs.existsSync(targetDir)) {
       fs.mkdirSync(targetDir, { recursive: true })
@@ -116,9 +113,33 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('open-folder', async (_e, folderPath: string) => {
-    const { shell } = require('electron')
     shell.openPath(folderPath)
     return true
+  })
+
+  ipcMain.handle('get-monthly-summary', () => {
+    return getMonthlySummary()
+  })
+
+  ipcMain.handle('get-attachment-counts', () => {
+    return getAttachmentCounts()
+  })
+
+  ipcMain.handle('export-excel', async (_e, csvContent: string, defaultName: string) => {
+    if (!mainWindow) return false
+    const result = await dialog.showSaveDialog(mainWindow, {
+      defaultPath: defaultName,
+      filters: [
+        { name: 'CSV 文件', extensions: ['csv'] },
+        { name: 'Excel 文件', extensions: ['xlsx'] }
+      ]
+    })
+    if (!result.canceled && result.filePath) {
+      const BOM = '\uFEFF'
+      fs.writeFileSync(result.filePath, BOM + csvContent, 'utf-8')
+      return result.filePath
+    }
+    return false
   })
 
   createWindow()

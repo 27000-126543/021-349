@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import {
   Form,
   Input,
@@ -14,11 +14,12 @@ import {
   Col,
   Space,
   Tag,
-  Divider
+  Divider,
+  Tooltip
 } from 'antd'
-import { CheckCircleOutlined, ExclamationCircleOutlined, SaveOutlined, ReloadOutlined } from '@ant-design/icons'
+import { CheckCircleOutlined, ExclamationCircleOutlined, SaveOutlined, ReloadOutlined, InfoCircleOutlined } from '@ant-design/icons'
 import dayjs from 'dayjs'
-import { RECORD_TYPES, SPECIALTIES, FLOW_STATUSES, PROPOSED_BY_OPTIONS, LedgerRecord } from '../types'
+import { RECORD_TYPES, SPECIALTIES, FLOW_STATUSES, PROPOSED_BY_OPTIONS, REQUIRED_FIELDS_FOR_SAVE, FIELD_LABELS, LedgerRecord } from '../types'
 
 const { TextArea } = Input
 const { Option } = Select
@@ -26,22 +27,25 @@ const { Option } = Select
 const AddRecordPage: React.FC = () => {
   const [form] = Form.useForm()
   const [ledgerNo, setLedgerNo] = useState<string>('')
-  const [missingFields, setMissingFields] = useState<string[]>([])
   const [isGenerating, setIsGenerating] = useState(false)
+  const [formValues, setFormValues] = useState<Record<string, any>>({})
 
-  const requiredFields = ['record_type', 'project_name', 'specialty', 'flow_status', 'receive_date']
+  const missingFields = useMemo(() => {
+    const missing: string[] = []
+    REQUIRED_FIELDS_FOR_SAVE.forEach(field => {
+      const val = formValues[field]
+      if (val === undefined || val === null || val === '' || (field === 'estimated_cost_impact' && (!val && val !== 0))) {
+        missing.push(FIELD_LABELS[field] || field)
+      }
+    })
+    return missing
+  }, [formValues])
 
-  const fieldLabels: Record<string, string> = {
-    record_type: '单据类型',
-    project_name: '工程名称',
-    building_location: '楼栋部位',
-    change_reason: '变更原因',
-    proposed_by: '提出单位',
-    specialty: '涉及专业',
-    estimated_cost_impact: '预计费用影响',
-    flow_status: '流转状态',
-    receive_date: '收文日期'
-  }
+  const canSave = missingFields.length === 0
+
+  const allRequiredFieldsFilled = useMemo(() => {
+    return formValues.record_type && formValues.project_name
+  }, [formValues.record_type, formValues.project_name])
 
   const generateNo = async (values: any) => {
     if (values.record_type && values.project_name) {
@@ -59,19 +63,15 @@ const AddRecordPage: React.FC = () => {
     }
   }
 
-  const checkRequiredFields = (values: any) => {
-    const missing: string[] = []
-    requiredFields.forEach(field => {
-      if (!values[field]) {
-        missing.push(fieldLabels[field] || field)
-      }
-    })
-    setMissingFields(missing)
-  }
-
   useEffect(() => {
-    generateNo(form.getFieldsValue())
+    const initial = form.getFieldsValue()
+    setFormValues(initial)
+    checkRequiredFields(initial)
   }, [])
+
+  const checkRequiredFields = (values: any) => {
+    setFormValues({ ...values })
+  }
 
   const onValuesChange = (changedValues: any, allValues: any) => {
     checkRequiredFields(allValues)
@@ -83,6 +83,12 @@ const AddRecordPage: React.FC = () => {
   const handleSubmit = async () => {
     try {
       const values = await form.validateFields()
+
+      if (missingFields.length > 0) {
+        message.error(`请先完善：${missingFields.join('、')}`)
+        return
+      }
+
       if (!ledgerNo) {
         message.error('台账编号未生成，请先填写单据类型和工程名称')
         return
@@ -100,13 +106,14 @@ const AddRecordPage: React.FC = () => {
       if (id) {
         message.success(`登记成功！台账编号：${ledgerNo}`)
         form.resetFields()
-        form.setFieldsValue({
+        const newInitial = {
           receive_date: dayjs(),
           stamped: false,
           settled: false
-        })
+        }
+        form.setFieldsValue(newInitial)
+        setFormValues(newInitial)
         setLedgerNo('')
-        setMissingFields([])
       }
     } catch (error) {
       console.error('提交失败:', error)
@@ -115,27 +122,35 @@ const AddRecordPage: React.FC = () => {
 
   const handleReset = () => {
     form.resetFields()
-    form.setFieldsValue({
+    const newInitial = {
       receive_date: dayjs(),
       stamped: false,
       settled: false
-    })
+    }
+    form.setFieldsValue(newInitial)
+    setFormValues(newInitial)
     setLedgerNo('')
-    setMissingFields([])
   }
+
+  const requiredLabel = (label: string) => (
+    <span>
+      {label}
+      <span style={{ color: '#ff4d4f', marginLeft: 2 }}>*</span>
+    </span>
+  )
 
   return (
     <div className="page-card">
       <h2 className="page-title">新增登记</h2>
 
-      <Card style={{ marginBottom: 20, background: '#f9f9f9' }}>
+      <Card style={{ marginBottom: 20, background: canSave ? '#f6ffed' : '#fff7e6', border: canSave ? '1px solid #b7eb8f' : '1px solid #ffe58f' }}>
         <Row align="middle" gutter={16}>
           <Col>
             <span style={{ fontSize: 14, color: '#595959' }}>台账编号：</span>
             {ledgerNo ? (
               <span className="ledger-no-display">{ledgerNo}</span>
             ) : (
-              <Tag color="default">请先选择单据类型和工程名称</Tag>
+              <Tag color="default">补齐必填项后自动生成</Tag>
             )}
           </Col>
           <Col flex="auto">
@@ -144,7 +159,14 @@ const AddRecordPage: React.FC = () => {
                 type="warning"
                 showIcon
                 icon={<ExclamationCircleOutlined />}
-                message={`待完善必填项：${missingFields.join('、')}`}
+                message={
+                  <span>
+                    待完善必填项（{missingFields.length}项）：
+                    {missingFields.map((f, i) => (
+                      <Tag key={f} color="warning" style={{ marginLeft: 4 }}>{f}</Tag>
+                    ))}
+                  </span>
+                }
                 style={{ border: 'none', padding: 0, background: 'transparent' }}
               />
             ) : (
@@ -152,7 +174,7 @@ const AddRecordPage: React.FC = () => {
                 type="success"
                 showIcon
                 icon={<CheckCircleOutlined />}
-                message="必填项已完整"
+                message="所有必填项已填写完整，可以保存入账"
                 style={{ border: 'none', padding: 0, background: 'transparent' }}
               />
             )}
@@ -170,13 +192,14 @@ const AddRecordPage: React.FC = () => {
           stamped: false,
           settled: false
         }}
+        requiredMark={false}
       >
         <h3 className="form-section-title">基本信息</h3>
         <Row gutter={24}>
           <Col span={8}>
             <Form.Item
               name="record_type"
-              label="单据类型"
+              label={requiredLabel('单据类型')}
               rules={[{ required: true, message: '请选择单据类型' }]}
             >
               <Select placeholder="请选择单据类型">
@@ -189,7 +212,7 @@ const AddRecordPage: React.FC = () => {
           <Col span={8}>
             <Form.Item
               name="project_name"
-              label="工程名称"
+              label={requiredLabel('工程名称')}
               rules={[{ required: true, message: '请输入工程名称' }]}
             >
               <Input placeholder="请输入工程名称" maxLength={100} />
@@ -198,7 +221,8 @@ const AddRecordPage: React.FC = () => {
           <Col span={8}>
             <Form.Item
               name="building_location"
-              label="楼栋部位"
+              label={requiredLabel('楼栋部位')}
+              rules={[{ required: true, message: '请输入楼栋部位' }]}
             >
               <Input placeholder="如：1号楼-3层-机电" maxLength={100} />
             </Form.Item>
@@ -212,7 +236,8 @@ const AddRecordPage: React.FC = () => {
           <Col span={12}>
             <Form.Item
               name="change_reason"
-              label="变更原因"
+              label={requiredLabel('变更原因')}
+              rules={[{ required: true, message: '请描述变更原因' }]}
             >
               <TextArea rows={3} placeholder="请描述变更原因及内容" maxLength={500} />
             </Form.Item>
@@ -234,7 +259,8 @@ const AddRecordPage: React.FC = () => {
           <Col span={8}>
             <Form.Item
               name="proposed_by"
-              label="提出单位"
+              label={requiredLabel('提出单位')}
+              rules={[{ required: true, message: '请选择提出单位' }]}
             >
               <Select placeholder="请选择提出单位">
                 {PROPOSED_BY_OPTIONS.map(opt => (
@@ -246,7 +272,7 @@ const AddRecordPage: React.FC = () => {
           <Col span={8}>
             <Form.Item
               name="specialty"
-              label="涉及专业"
+              label={requiredLabel('涉及专业')}
               rules={[{ required: true, message: '请选择涉及专业' }]}
             >
               <Select placeholder="请选择涉及专业">
@@ -259,11 +285,12 @@ const AddRecordPage: React.FC = () => {
           <Col span={8}>
             <Form.Item
               name="estimated_cost_impact"
-              label="预计费用影响（元）"
+              label={requiredLabel('预计费用影响（元）')}
+              rules={[{ required: true, message: '请输入预计费用影响' }]}
             >
               <InputNumber
                 style={{ width: '100%' }}
-                placeholder="请输入金额"
+                placeholder="请输入金额，无影响填0"
                 min={0}
                 precision={2}
                 step={1000}
@@ -279,7 +306,7 @@ const AddRecordPage: React.FC = () => {
           <Col span={8}>
             <Form.Item
               name="flow_status"
-              label="当前流转状态"
+              label={requiredLabel('当前流转状态')}
               rules={[{ required: true, message: '请选择流转状态' }]}
             >
               <Select placeholder="请选择流转状态">
@@ -292,7 +319,7 @@ const AddRecordPage: React.FC = () => {
           <Col span={8}>
             <Form.Item
               name="receive_date"
-              label="收文日期"
+              label={requiredLabel('收文日期')}
               rules={[{ required: true, message: '请选择收文日期' }]}
             >
               <DatePicker style={{ width: '100%' }} />
@@ -316,15 +343,18 @@ const AddRecordPage: React.FC = () => {
 
         <Row justify="center">
           <Space size="large">
-            <Button
-              type="primary"
-              size="large"
-              icon={<SaveOutlined />}
-              onClick={handleSubmit}
-              loading={isGenerating}
-            >
-              保存登记
-            </Button>
+            <Tooltip title={canSave ? '' : `还需完善：${missingFields.join('、')}`}>
+              <Button
+                type="primary"
+                size="large"
+                icon={<SaveOutlined />}
+                onClick={handleSubmit}
+                loading={isGenerating}
+                disabled={!canSave}
+              >
+                {canSave ? '保存入账' : `待完善 (${missingFields.length}项)`}
+              </Button>
+            </Tooltip>
             <Button
               size="large"
               icon={<ReloadOutlined />}

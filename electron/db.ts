@@ -28,6 +28,7 @@ export interface Attachment {
   file_path: string
   file_size: number
   file_type: string
+  category: string
   created_at?: string
 }
 
@@ -56,7 +57,29 @@ export function initDatabase(filePath: string): void {
     saveData(defaultData())
   } else {
     loadData()
+    migrateData()
   }
+}
+
+function migrateData(): void {
+  const data = loadData()
+  let changed = false
+  for (const att of data.attachments) {
+    if (!att.category) {
+      att.category = guessCategory(att.file_name, att.file_type)
+      changed = true
+    }
+  }
+  if (changed) saveData(data)
+}
+
+function guessCategory(fileName: string, fileType: string): string {
+  const ext = (fileType || fileName.split('.').pop() || '').toLowerCase()
+  if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg', 'heic'].includes(ext)) return '照片'
+  if (ext === 'pdf') return '扫描件'
+  if (['doc', 'docx', 'txt', 'rtf', 'wps'].includes(ext)) return '会议纪要'
+  if (['xls', 'xlsx', 'csv'].includes(ext)) return '结算资料'
+  return '扫描件'
 }
 
 export function getUserDataPath(): string {
@@ -81,6 +104,10 @@ function saveData(data: DatabaseData): void {
     fs.mkdirSync(dir, { recursive: true })
   }
   fs.writeFileSync(dbPath, JSON.stringify(data, null, 2), 'utf-8')
+}
+
+function invalidateCache(): void {
+  cache = null
 }
 
 export function generateLedgerNo(recordType: string, projectName: string): string {
@@ -184,6 +211,10 @@ export function searchRecords(filters: any): LedgerRecord[] {
   if (filters.not_settled) {
     results = results.filter(r => r.settled === 0)
   }
+  if (filters.no_attachments) {
+    const recordsWithAttachments = new Set(data.attachments.map(a => a.record_id))
+    results = results.filter(r => !recordsWithAttachments.has(r.id!))
+  }
   if (filters.keyword) {
     const kw = filters.keyword.toLowerCase()
     results = results.filter(r =>
@@ -196,11 +227,109 @@ export function searchRecords(filters: any): LedgerRecord[] {
   return results.sort((a, b) => (b.id || 0) - (a.id || 0))
 }
 
+export function getMonthlySummary(): any[] {
+  const data = loadData()
+  const recordsByMonth: Record<string, any> = {}
+
+  for (const r of data.records) {
+    if (!r.receive_date) continue
+    const month = r.receive_date.substring(0, 7)
+    if (!recordsByMonth[month]) {
+      recordsByMonth[month] = {
+        month,
+        total: 0,
+        not_stamped: 0,
+        not_settled: 0,
+        no_attachments: 0,
+        records: []
+      }
+    }
+
+    const attCount = data.attachments.filter(a => a.record_id === r.id).length
+    recordsByMonth[month].total++
+    if (!r.stamped) recordsByMonth[month].not_stamped++
+    if (!r.settled) recordsByMonth[month].not_settled++
+    if (attCount === 0) recordsByMonth[month].no_attachments++
+    recordsByMonth[month].records.push({ ...r, attachment_count: attCount })
+  }
+
+  return Object.values(recordsByMonth).sort((a: any, b: any) => b.month.localeCompare(a.month))
+}
+
 export function getAllAttachments(recordId: number): Attachment[] {
   const data = loadData()
   return data.attachments
     .filter(a => a.record_id === recordId)
     .sort((a, b) => (b.id || 0) - (a.id || 0))
+}
+
+export function getAttachmentsBatch(recordIds: number[]): Record<number, Attachment[]> {
+  const data = loadData()
+  const result: Record<number, Attachment[]> = {}
+  for (const id of recordIds) {
+    result[id] = data.attachments
+      .filter(a => a.record_id === id)
+      .sort((a, b) => (b.id || 0) - (a.id || 0))
+  }
+  return result
+}
+
+export function getAttachmentCounts(): Record<number, number> {
+  const data = loadData()
+  const counts: Record<number, number> = {}
+  for (const att of data.attachments) {
+    counts[att.record_id] = (counts[att.record_id] || 0) + 1
+  }
+  return counts
+}
+
+export function saveFileAndAddAttachment(
+  sourcePath: string,
+  recordNo: string,
+  recordId: number,
+  category: string
+): Attachment | null {
+  try {
+    const userDataDir = path.dirname(dbPath)
+    const targetDir = path.join(userDataDir, 'attachments', recordNo)
+    if (!fs.existsSync(targetDir)) {
+      fs.mkdirSync(targetDir, { recursive: true })
+    }
+
+    const basename = path.basename(sourcePath)
+    const uniqueName = `${Date.now()}_${basename}`
+    const targetPath = path.join(targetDir, uniqueName)
+
+    if (fs.existsSync(sourcePath)) {
+      fs.copyFileSync(sourcePath, targetPath)
+    } else {
+      return null
+    }
+
+    const stats = fs.statSync(targetPath)
+    const ext = path.extname(basename).slice(1).toLowerCase()
+
+    const data = loadData()
+    const id = data.nextAttachmentId
+    const now = dayjs().format('YYYY-MM-DD HH:mm:ss')
+    const newAtt: Attachment = {
+      id,
+      record_id: recordId,
+      file_name: basename,
+      file_path: targetPath,
+      file_size: stats.size,
+      file_type: ext,
+      category: category || guessCategory(basename, ext),
+      created_at: now
+    }
+    data.attachments.push(newAtt)
+    data.nextAttachmentId = id + 1
+    saveData(data)
+    return newAtt
+  } catch (e) {
+    console.error('保存文件并添加附件失败:', e)
+    return null
+  }
 }
 
 export function addAttachment(attachment: Attachment): number {
@@ -210,6 +339,7 @@ export function addAttachment(attachment: Attachment): number {
   const newAtt: Attachment = {
     ...attachment,
     id,
+    category: attachment.category || guessCategory(attachment.file_name, attachment.file_type),
     created_at: now
   }
   data.attachments.push(newAtt)
@@ -224,6 +354,19 @@ export function deleteAttachment(id: number): boolean {
   data.attachments = data.attachments.filter(a => a.id !== id)
   saveData(data)
   return data.attachments.length < before
+}
+
+export function deleteAttachmentWithFile(id: number): boolean {
+  const data = loadData()
+  const att = data.attachments.find(a => a.id === id)
+  if (att && att.file_path && fs.existsSync(att.file_path)) {
+    try {
+      fs.unlinkSync(att.file_path)
+    } catch (e) {
+      console.error('删除文件失败:', e)
+    }
+  }
+  return deleteAttachment(id)
 }
 
 export { }

@@ -11,10 +11,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   searchRecords: (filters: any) => ipcRenderer.invoke('search-records', filters),
   getAttachments: (recordId: number) => ipcRenderer.invoke('get-attachments', recordId),
   addAttachment: (attachment: any) => ipcRenderer.invoke('add-attachment', attachment),
-  deleteAttachmentFile: (id: number, filePath: string) =>
-    ipcRenderer.invoke('delete-attachment-file', id, filePath),
+  deleteAttachmentFile: (id: number) =>
+    ipcRenderer.invoke('delete-attachment-file', id),
+  saveAndRegisterFile: (sourcePath: string, recordNo: string, recordId: number, category: string) =>
+    ipcRenderer.invoke('save-and-register-file', sourcePath, recordNo, recordId, category),
   saveFileToDirectory: (sourcePath: string, recordNo: string, fileName: string) =>
     ipcRenderer.invoke('save-file-to-directory', sourcePath, recordNo, fileName),
   selectFileDialog: () => ipcRenderer.invoke('select-file-dialog'),
-  openFolder: (folderPath: string) => ipcRenderer.invoke('open-folder', folderPath)
+  openFolder: (folderPath: string) => ipcRenderer.invoke('open-folder', folderPath),
+  getMonthlySummary: () => ipcRenderer.invoke('get-monthly-summary'),
+  getAttachmentCounts: () => ipcRenderer.invoke('get-attachment-counts'),
+  exportExcel: (csvContent: string, defaultName: string) =>
+    ipcRenderer.invoke('export-excel', csvContent, defaultName)
 })

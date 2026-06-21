@@ -12,10 +12,10 @@ import {
   Col,
   Descriptions,
   Divider,
-  Modal,
   Popconfirm,
-  Progress,
-  Tooltip
+  Tooltip,
+  Badge,
+  Collapse
 } from 'antd'
 import {
   InboxOutlined,
@@ -27,9 +27,12 @@ import {
   FilePdfOutlined,
   FileTextOutlined,
   FileZipOutlined,
-  FileUnknownOutlined
+  FileUnknownOutlined,
+  FileExcelOutlined,
+  CheckCircleOutlined,
+  ExclamationCircleOutlined
 } from '@ant-design/icons'
-import { LedgerRecord, Attachment } from '../types'
+import { LedgerRecord, Attachment, ATTACHMENT_CATEGORIES, CATEGORY_COLOR_MAP, getMissingMaterials } from '../types'
 
 const { Option } = Select
 
@@ -40,15 +43,14 @@ const formatFileSize = (bytes: number): string => {
   return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB'
 }
 
-const getFileIcon = (fileName: string) => {
-  const ext = fileName.split('.').pop()?.toLowerCase() || ''
-  if (['jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'svg'].includes(ext)) {
-    return <FileImageOutlined style={{ color: '#52c41a' }} />
+const getCategoryIcon = (category: string) => {
+  switch (category) {
+    case '扫描件': return <FilePdfOutlined style={{ color: CATEGORY_COLOR_MAP['扫描件'] }} />
+    case '照片': return <FileImageOutlined style={{ color: CATEGORY_COLOR_MAP['照片'] }} />
+    case '会议纪要': return <FileTextOutlined style={{ color: CATEGORY_COLOR_MAP['会议纪要'] }} />
+    case '结算资料': return <FileExcelOutlined style={{ color: CATEGORY_COLOR_MAP['结算资料'] }} />
+    default: return <FileUnknownOutlined style={{ color: CATEGORY_COLOR_MAP['其他'] }} />
   }
-  if (ext === 'pdf') return <FilePdfOutlined style={{ color: '#ff4d4f' }} />
-  if (['doc', 'docx', 'txt', 'rtf'].includes(ext)) return <FileTextOutlined style={{ color: '#1890ff' }} />
-  if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return <FileZipOutlined style={{ color: '#faad14' }} />
-  return <FileUnknownOutlined style={{ color: '#8c8c8c' }} />
 }
 
 const AttachmentPage: React.FC = () => {
@@ -58,12 +60,9 @@ const AttachmentPage: React.FC = () => {
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [isDragging, setIsDragging] = useState(false)
   const [uploading, setUploading] = useState(false)
-  const [previewModal, setPreviewModal] = useState<{ visible: boolean; file: Attachment | null }>({
-    visible: false,
-    file: null
-  })
-  const dropRef = useRef<HTMLDivElement>(null)
+  const [uploadCategory, setUploadCategory] = useState<string>('扫描件')
   const [userDataPath, setUserDataPath] = useState('')
+  const dropRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     loadRecords()
@@ -105,7 +104,7 @@ const AttachmentPage: React.FC = () => {
   }
 
   const handleFileSelect = async () => {
-    if (!selectedRecordId) {
+    if (!selectedRecordId || !selectedRecord) {
       message.warning('请先选择一条台账记录')
       return
     }
@@ -119,60 +118,54 @@ const AttachmentPage: React.FC = () => {
     if (!selectedRecord || !selectedRecordId) return
     setUploading(true)
     let successCount = 0
+    let failCount = 0
 
     for (const filePath of filePaths) {
       try {
-        const fs = window.require ? (window.require('fs') as typeof import('fs')) : null
-        if (!fs) continue
-
-        const pathModule = window.require('path') as typeof import('path')
-        const fileName = pathModule.basename(filePath)
-        const stats = fs.statSync(filePath)
-
-        const uniqueName = `${Date.now()}_${fileName}`
-        const savedPath = await window.electronAPI.saveFileToDirectory(
+        const result = await window.electronAPI.saveAndRegisterFile(
           filePath,
           selectedRecord.ledger_no,
-          uniqueName
+          selectedRecordId,
+          uploadCategory
         )
-
-        const attachment: Attachment = {
-          record_id: selectedRecordId,
-          file_name: fileName,
-          file_path: savedPath,
-          file_size: stats.size,
-          file_type: pathModule.extname(fileName).slice(1)
+        if (result) {
+          successCount++
+        } else {
+          failCount++
         }
-
-        await window.electronAPI.addAttachment(attachment)
-        successCount++
       } catch (error) {
         console.error('保存文件失败:', error)
-        message.error(`文件 ${filePath} 保存失败`)
+        failCount++
       }
     }
 
     setUploading(false)
     if (successCount > 0) {
-      message.success(`成功归档 ${successCount} 个文件`)
+      message.success(`成功归档 ${successCount} 个文件到「${uploadCategory}」`)
       loadAttachments(selectedRecordId)
+    }
+    if (failCount > 0) {
+      message.error(`${failCount} 个文件归档失败`)
     }
   }
 
   const handleDragOver = (e: React.DragEvent) => {
     e.preventDefault()
+    e.stopPropagation()
     setIsDragging(true)
   }
 
   const handleDragLeave = (e: React.DragEvent) => {
     e.preventDefault()
+    e.stopPropagation()
     setIsDragging(false)
   }
 
   const handleDrop = (e: React.DragEvent) => {
     e.preventDefault()
+    e.stopPropagation()
     setIsDragging(false)
-    if (!selectedRecordId) {
+    if (!selectedRecordId || !selectedRecord) {
       message.warning('请先选择一条台账记录')
       return
     }
@@ -190,7 +183,7 @@ const AttachmentPage: React.FC = () => {
 
   const handleDeleteAttachment = async (att: Attachment) => {
     try {
-      await window.electronAPI.deleteAttachmentFile(att.id!, att.file_path)
+      await window.electronAPI.deleteAttachmentFile(att.id!)
       message.success('已删除附件')
       loadAttachments(selectedRecordId!)
     } catch (error) {
@@ -204,13 +197,43 @@ const AttachmentPage: React.FC = () => {
       return
     }
     try {
-      const pathModule = window.require('path') as typeof import('path')
-      const targetDir = pathModule.join(userDataPath, 'attachments', selectedRecord.ledger_no)
-      await window.electronAPI.openFolder(targetDir)
+      const folderPath = `${userDataPath}/attachments/${selectedRecord.ledger_no}`
+      await window.electronAPI.openFolder(folderPath)
     } catch (error) {
       message.error('打开文件夹失败')
     }
   }
+
+  const handleOpenAttachmentDir = async (att: Attachment) => {
+    try {
+      const parts = att.file_path.split(/[/\\]/)
+      parts.pop()
+      const dir = parts.join('/')
+      await window.electronAPI.openFolder(dir)
+    } catch (error) {
+      message.error('打开目录失败')
+    }
+  }
+
+  const groupedAttachments = () => {
+    const groups: Record<string, Attachment[]> = {}
+    ATTACHMENT_CATEGORIES.forEach(cat => {
+      groups[cat] = []
+    })
+    attachments.forEach(att => {
+      const cat = ATTACHMENT_CATEGORIES.includes(att.category as any) ? att.category : '其他'
+      if (!groups[cat]) groups[cat] = []
+      groups[cat].push(att)
+    })
+    return groups
+  }
+
+  const missingMaterials = selectedRecord ? getMissingMaterials(selectedRecord, attachments) : []
+
+  const completedMaterials = (() => {
+    const all = ['盖章件', '结算单', '变更说明', '会议纪要', '现场照片']
+    return all.filter(m => !missingMaterials.includes(m))
+  })()
 
   return (
     <div className="page-card">
@@ -273,7 +296,7 @@ const AttachmentPage: React.FC = () => {
             onDragOver={handleDragOver}
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
-            onClick={handleFileSelect}
+            onClick={selectedRecord ? handleFileSelect : undefined}
           >
             {!selectedRecord ? (
               <>
@@ -289,11 +312,29 @@ const AttachmentPage: React.FC = () => {
                   <InboxOutlined />
                 </div>
                 <p style={{ fontWeight: 500, margin: 0 }}>
-                  {isDragging ? '释放文件即可归档' : '将扫描件拖入此处或点击选择'}
+                  {isDragging ? '释放文件即可归档' : '将文件拖入此处或点击选择'}
                 </p>
                 <p style={{ color: '#8c8c8c', fontSize: 12, marginTop: 4 }}>
-                  支持 PDF、图片、Word、Excel 等格式
+                  当前归类：<Tag color="blue">{uploadCategory}</Tag>
                 </p>
+                <div style={{ marginTop: 8, width: '80%' }}>
+                  <Select
+                    size="small"
+                    value={uploadCategory}
+                    onChange={setUploadCategory}
+                    style={{ width: '100%' }}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {ATTACHMENT_CATEGORIES.map(cat => (
+                      <Option key={cat} value={cat}>
+                        <Space>
+                          {getCategoryIcon(cat)}
+                          {cat}
+                        </Space>
+                      </Option>
+                    ))}
+                  </Select>
+                </div>
                 <Button
                   type="primary"
                   icon={<UploadOutlined />}
@@ -308,7 +349,7 @@ const AttachmentPage: React.FC = () => {
           </div>
         </Col>
 
-        <Col span={16} style={{ height: '100%', overflow: 'hidden', display: 'flex', flexDirection: 'column' }}>
+        <Col span={16} style={{ height: '100%', overflow: 'auto' }}>
           {selectedRecord ? (
             <>
               <Card size="small" style={{ marginBottom: 12 }} bodyStyle={{ padding: 12 }}>
@@ -331,6 +372,40 @@ const AttachmentPage: React.FC = () => {
               <Card
                 title={
                   <Space>
+                    <CheckCircleOutlined />
+                    <span>材料齐备情况</span>
+                  </Space>
+                }
+                size="small"
+                style={{ marginBottom: 12 }}
+                bodyStyle={{ padding: 12 }}
+              >
+                <Row gutter={8}>
+                  {['盖章件', '结算单', '变更说明', '会议纪要', '现场照片'].map(mat => {
+                    const isMissing = missingMaterials.includes(mat)
+                    return (
+                      <Col key={mat}>
+                        <Tag
+                          icon={isMissing ? <ExclamationCircleOutlined /> : <CheckCircleOutlined />}
+                          color={isMissing ? 'error' : 'success'}
+                          style={{ fontSize: 13, padding: '4px 12px' }}
+                        >
+                          {mat}
+                        </Tag>
+                      </Col>
+                    )
+                  })}
+                </Row>
+                {missingMaterials.length === 0 && (
+                  <div style={{ marginTop: 8, color: '#52c41a', fontWeight: 500 }}>
+                    所有材料齐全，可进行竣工资料移交
+                  </div>
+                )}
+              </Card>
+
+              <Card
+                title={
+                  <Space>
                     <FileOutlined />
                     <span>附件列表</span>
                     <Tag color="blue">{attachments.length} 个文件</Tag>
@@ -342,8 +417,8 @@ const AttachmentPage: React.FC = () => {
                   </Space>
                 }
                 size="small"
-                style={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column' }}
-                bodyStyle={{ flex: 1, overflow: 'auto', padding: 12 }}
+                style={{ flex: 1 }}
+                bodyStyle={{ padding: 12 }}
               >
                 {attachments.length === 0 ? (
                   <Empty
@@ -354,98 +429,96 @@ const AttachmentPage: React.FC = () => {
                     }
                   />
                 ) : (
-                  <List
-                    dataSource={attachments}
-                    renderItem={(item) => (
-                      <List.Item
-                        key={item.id}
-                        actions={[
-                          <Tooltip key="path" title={item.file_path}>
-                            <Button
-                              type="link"
-                              size="small"
-                              icon={<FolderOpenOutlined />}
-                              onClick={() => {
-                                const pathModule = window.require('path') as typeof import('path')
-                                window.electronAPI.openFolder(pathModule.dirname(item.file_path))
-                              }}
-                            >
-                              所在目录
-                            </Button>
-                          </Tooltip>,
-                          <Popconfirm
-                            key="del"
-                            title="确定删除此附件吗？"
-                            onConfirm={() => handleDeleteAttachment(item)}
-                            okText="确定"
-                            cancelText="取消"
-                          >
-                            <Button type="link" size="small" danger icon={<DeleteOutlined />}>
-                              删除
-                            </Button>
-                          </Popconfirm>
-                        ]}
-                      >
-                        <List.Item.Meta
-                          avatar={
-                            <span style={{ fontSize: 32 }}>
-                              {getFileIcon(item.file_name)}
-                            </span>
-                          }
-                          title={
-                            <span>
-                              {item.file_name}
-                              <Tag style={{ marginLeft: 8 }}>{item.file_type?.toUpperCase() || 'FILE'}</Tag>
-                            </span>
-                          }
-                          description={
+                  <Collapse
+                    defaultActiveKey={ATTACHMENT_CATEGORIES.filter(cat =>
+                      groupedAttachments()[cat] && groupedAttachments()[cat].length > 0
+                    )}
+                    ghost
+                  >
+                    {ATTACHMENT_CATEGORIES.map(cat => {
+                      const items = groupedAttachments()[cat] || []
+                      return (
+                        <Collapse.Panel
+                          key={cat}
+                          header={
                             <Space>
-                              <span style={{ color: '#8c8c8c' }}>{formatFileSize(item.file_size)}</span>
-                              <span style={{ color: '#bfbfbf' }}>·</span>
-                              <span style={{ color: '#8c8c8c' }}>归档于 {item.created_at}</span>
+                              {getCategoryIcon(cat)}
+                              <span style={{ fontWeight: 500 }}>{cat}</span>
+                              <Badge count={items.length} style={{ backgroundColor: CATEGORY_COLOR_MAP[cat] || '#8c8c8c' }} />
                             </Space>
                           }
-                        />
-                      </List.Item>
-                    )}
-                  />
+                        >
+                          {items.length === 0 ? (
+                            <div style={{ color: '#bfbfbf', padding: '8px 0', fontSize: 13 }}>
+                              暂无{cat}类附件
+                            </div>
+                          ) : (
+                            <List
+                              size="small"
+                              dataSource={items}
+                              renderItem={(item) => (
+                                <List.Item
+                                  key={item.id}
+                                  actions={[
+                                    <Tooltip key="dir" title="打开所在目录">
+                                      <Button
+                                        type="link"
+                                        size="small"
+                                        icon={<FolderOpenOutlined />}
+                                        onClick={() => handleOpenAttachmentDir(item)}
+                                      />
+                                    </Tooltip>,
+                                    <Popconfirm
+                                      key="del"
+                                      title="确定删除此附件吗？"
+                                      onConfirm={() => handleDeleteAttachment(item)}
+                                      okText="确定"
+                                      cancelText="取消"
+                                    >
+                                      <Button type="link" size="small" danger icon={<DeleteOutlined />} />
+                                    </Popconfirm>
+                                  ]}
+                                >
+                                  <List.Item.Meta
+                                    avatar={
+                                      <span style={{ fontSize: 24 }}>
+                                        {getCategoryIcon(item.category)}
+                                      </span>
+                                    }
+                                    title={
+                                      <span>
+                                        {item.file_name}
+                                        <Tag style={{ marginLeft: 8 }}>{item.file_type?.toUpperCase() || 'FILE'}</Tag>
+                                      </span>
+                                    }
+                                    description={
+                                      <Space size={4}>
+                                        <span style={{ color: '#8c8c8c' }}>{formatFileSize(item.file_size)}</span>
+                                        <span style={{ color: '#bfbfbf' }}>·</span>
+                                        <span style={{ color: '#8c8c8c' }}>{item.created_at}</span>
+                                      </Space>
+                                    }
+                                  />
+                                </List.Item>
+                              )}
+                            />
+                          )}
+                        </Collapse.Panel>
+                      )
+                    })}
+                  </Collapse>
                 )}
               </Card>
             </>
           ) : (
             <Card
-              style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+              style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center' }}
             >
               <Empty description="请在左侧选择台账记录以查看和管理附件" />
             </Card>
           )}
         </Col>
       </Row>
-
-      <Modal
-        title={previewModal.file?.file_name}
-        open={previewModal.visible}
-        onCancel={() => setPreviewModal({ visible: false, file: null })}
-        footer={null}
-        width={800}
-      >
-        {previewModal.file && (
-          <div style={{ textAlign: 'center' }}>
-            <p style={{ color: '#8c8c8c' }}>
-              文件位置：{previewModal.file.file_path}
-            </p>
-            <Button
-              icon={<FolderOpenOutlined />}
-              onClick={() => {
-                const pathModule = window.require('path') as typeof import('path')
-                window.electronAPI.openFolder(pathModule.dirname(previewModal.file!.file_path))
-              }}
-            >
-              打开文件所在目录
-            </Button>
-          </div>
-        )}
-      </Modal>
     </div>
   )
 }
