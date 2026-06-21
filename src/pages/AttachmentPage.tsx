@@ -30,7 +30,9 @@ import {
   FileUnknownOutlined,
   FileExcelOutlined,
   CheckCircleOutlined,
-  ExclamationCircleOutlined
+  ExclamationCircleOutlined,
+  ExportOutlined,
+  PaperClipOutlined
 } from '@ant-design/icons'
 import { LedgerRecord, Attachment, ATTACHMENT_CATEGORIES, CATEGORY_COLOR_MAP, getMissingMaterials } from '../types'
 
@@ -68,6 +70,24 @@ const AttachmentPage: React.FC = () => {
     loadRecords()
     loadPaths()
   }, [])
+
+  useEffect(() => {
+    const sid = sessionStorage.getItem('selectedRecordId')
+    if (sid) {
+      sessionStorage.removeItem('selectedRecordId')
+      const id = Number(sid)
+      const doSelect = () => {
+        const rec = records.find(r => r.id === id)
+        if (rec) {
+          handleSelectRecord(id)
+          message.success(`已定位到 ${rec.ledger_no}，可直接上传附件`)
+        } else if (records.length === 0) {
+          setTimeout(doSelect, 300)
+        }
+      }
+      doSelect()
+    }
+  }, [records])
 
   const loadPaths = async () => {
     try {
@@ -212,6 +232,29 @@ const AttachmentPage: React.FC = () => {
       await window.electronAPI.openFolder(dir)
     } catch (error) {
       message.error('打开目录失败')
+    }
+  }
+
+  const [generatingPkg, setGeneratingPkg] = useState(false)
+  const handleGenerateHandoverPackage = async () => {
+    if (!selectedRecordId || !selectedRecord) {
+      message.warning('请先选择一条台账记录')
+      return
+    }
+    try {
+      setGeneratingPkg(true)
+      message.loading({ content: `正在生成 ${selectedRecord.ledger_no} 移交包...`, key: 'hpkg' })
+      const result = await window.electronAPI.generateHandoverPackage(selectedRecordId)
+      message.destroy('hpkg')
+      if (result) {
+        message.success(`移交包已生成：${result}`)
+      }
+    } catch (e) {
+      message.destroy('hpkg')
+      console.error(e)
+      message.error('生成移交包失败')
+    } finally {
+      setGeneratingPkg(false)
     }
   }
 
@@ -363,9 +406,27 @@ const AttachmentPage: React.FC = () => {
                       {selectedRecord.specialty} / {selectedRecord.record_type}
                     </Descriptions.Item>
                   </Descriptions>
-                  <Button icon={<FolderOpenOutlined />} onClick={handleOpenFolder}>
-                    打开归档文件夹
-                  </Button>
+                  <Space>
+                    <Button icon={<FolderOpenOutlined />} onClick={handleOpenFolder}>
+                      打开归档文件夹
+                    </Button>
+                    <Tooltip
+                      title={
+                        missingMaterials.length > 0
+                          ? `还有 ${missingMaterials.length} 项材料未补，清单中会一并列出`
+                          : '材料齐全，清单中无需补项'
+                      }
+                    >
+                      <Button
+                        type="primary"
+                        icon={<ExportOutlined />}
+                        onClick={handleGenerateHandoverPackage}
+                        loading={generatingPkg}
+                      >
+                        生成移交包
+                      </Button>
+                    </Tooltip>
+                  </Space>
                 </div>
               </Card>
 

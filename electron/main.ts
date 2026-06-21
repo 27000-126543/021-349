@@ -6,6 +6,8 @@ import {
   searchRecords, getAllAttachments, addAttachment, deleteAttachment,
   generateLedgerNo, getMonthlySummary, getAttachmentCounts,
   saveFileAndAddAttachment, deleteAttachmentWithFile,
+  generateHandoverPackage, getUrgencyBoard,
+  exportRecordsToExcel, getRecordById,
   LedgerRecord, Attachment
 } from './db'
 
@@ -56,7 +58,9 @@ app.whenReady().then(() => {
   })
 
   ipcMain.handle('add-record', (_e, record: LedgerRecord) => {
-    return addRecord(record)
+    const id = addRecord(record)
+    const newRecord = getRecordById(id)
+    return { id, record: newRecord }
   })
 
   ipcMain.handle('update-record', (_e, id: number, record: Partial<LedgerRecord>) => {
@@ -125,19 +129,37 @@ app.whenReady().then(() => {
     return getAttachmentCounts()
   })
 
-  ipcMain.handle('export-excel', async (_e, csvContent: string, defaultName: string) => {
+  ipcMain.handle('get-urgency-board', () => {
+    return getUrgencyBoard()
+  })
+
+  ipcMain.handle('export-excel', async (_e, records: LedgerRecord[]) => {
     if (!mainWindow) return false
+    const defaultName = `台账导出_${require('dayjs')().format('YYYYMMDD_HHmmss')}.xlsx`
     const result = await dialog.showSaveDialog(mainWindow, {
       defaultPath: defaultName,
-      filters: [
-        { name: 'CSV 文件', extensions: ['csv'] },
-        { name: 'Excel 文件', extensions: ['xlsx'] }
-      ]
+      filters: [{ name: 'Excel 文件', extensions: ['xlsx'] }]
     })
     if (!result.canceled && result.filePath) {
-      const BOM = '\uFEFF'
-      fs.writeFileSync(result.filePath, BOM + csvContent, 'utf-8')
-      return result.filePath
+      const dir = path.dirname(result.filePath)
+      const name = path.basename(result.filePath)
+      const realPath = exportRecordsToExcel(records, name, dir)
+      return realPath
+    }
+    return false
+  })
+
+  ipcMain.handle('generate-handover-package', async (_e, recordId: number) => {
+    if (!mainWindow) return false
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: '选择移交包保存位置',
+      properties: ['openDirectory']
+    })
+    if (result.canceled || result.filePaths.length === 0) return false
+    const pkg = generateHandoverPackage(recordId, result.filePaths[0])
+    if (pkg) {
+      shell.openPath(pkg.path)
+      return pkg
     }
     return false
   })

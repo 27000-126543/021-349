@@ -107,7 +107,7 @@ declare global {
     electronAPI: {
       getUserDataPath: () => Promise<{ userDataPath: string; attachmentsPath: string }>
       generateLedgerNo: (recordType: string, projectName: string) => Promise<string>
-      addRecord: (record: LedgerRecord) => Promise<number>
+      addRecord: (record: LedgerRecord) => Promise<{ id: number; record: LedgerRecord }>
       updateRecord: (id: number, record: Partial<LedgerRecord>) => Promise<boolean>
       deleteRecord: (id: number) => Promise<boolean>
       getAllRecords: () => Promise<LedgerRecord[]>
@@ -121,7 +121,9 @@ declare global {
       openFolder: (folderPath: string) => Promise<boolean>
       getMonthlySummary: () => Promise<any[]>
       getAttachmentCounts: () => Promise<Record<number, number>>
-      exportExcel: (csvContent: string, defaultName: string) => Promise<string | false>
+      getUrgencyBoard: () => Promise<any[]>
+      exportExcel: (records: LedgerRecord[]) => Promise<string | false>
+      generateHandoverPackage: (recordId: number) => Promise<false | { path: string; manifest: any }>
     }
   }
 }

@@ -15,26 +15,49 @@ import {
   Space,
   Tag,
   Divider,
-  Tooltip
+  Tooltip,
+  Modal,
+  Result,
+  Statistic
 } from 'antd'
-import { CheckCircleOutlined, ExclamationCircleOutlined, SaveOutlined, ReloadOutlined, InfoCircleOutlined } from '@ant-design/icons'
+import {
+  CheckCircleOutlined,
+  ExclamationCircleOutlined,
+  SaveOutlined,
+  ReloadOutlined,
+  PaperClipOutlined,
+  EyeOutlined,
+  PlusOutlined,
+  FileDoneOutlined
+} from '@ant-design/icons'
 import dayjs from 'dayjs'
-import { RECORD_TYPES, SPECIALTIES, FLOW_STATUSES, PROPOSED_BY_OPTIONS, REQUIRED_FIELDS_FOR_SAVE, FIELD_LABELS, LedgerRecord } from '../types'
+import { useNavigate } from 'react-router-dom'
+import {
+  RECORD_TYPES, SPECIALTIES, FLOW_STATUSES, PROPOSED_BY_OPTIONS,
+  REQUIRED_FIELDS_FOR_SAVE, FIELD_LABELS, LedgerRecord
+} from '../types'
 
 const { TextArea } = Input
 const { Option } = Select
 
 const AddRecordPage: React.FC = () => {
+  const navigate = useNavigate()
   const [form] = Form.useForm()
   const [ledgerNo, setLedgerNo] = useState<string>('')
   const [isGenerating, setIsGenerating] = useState(false)
   const [formValues, setFormValues] = useState<Record<string, any>>({})
+  const [successModal, setSuccessModal] = useState<{
+    open: boolean
+    record: LedgerRecord | null
+    id: number
+  }>({ open: false, record: null, id: 0 })
 
   const missingFields = useMemo(() => {
     const missing: string[] = []
     REQUIRED_FIELDS_FOR_SAVE.forEach(field => {
       const val = formValues[field]
-      if (val === undefined || val === null || val === '' || (field === 'estimated_cost_impact' && (!val && val !== 0))) {
+      if (val === undefined || val === null || val === '' ||
+          (field === 'estimated_cost_impact' && (val === undefined || val === null || (typeof val !== 'number' && !val)))) {
         missing.push(FIELD_LABELS[field] || field)
       }
     })
@@ -43,41 +66,33 @@ const AddRecordPage: React.FC = () => {
 
   const canSave = missingFields.length === 0
 
-  const allRequiredFieldsFilled = useMemo(() => {
-    return formValues.record_type && formValues.project_name
-  }, [formValues.record_type, formValues.project_name])
-
-  const generateNo = async (values: any) => {
-    if (values.record_type && values.project_name) {
-      setIsGenerating(true)
-      try {
-        const no = await window.electronAPI.generateLedgerNo(values.record_type, values.project_name)
-        setLedgerNo(no)
-      } catch (error) {
-        console.error('生成编号失败:', error)
-      } finally {
-        setIsGenerating(false)
-      }
+  useEffect(() => {
+    if (canSave && formValues.record_type && formValues.project_name) {
+      generateNo(formValues)
     } else {
       setLedgerNo('')
     }
-  }
+  }, [canSave, formValues.record_type, formValues.project_name])
 
   useEffect(() => {
     const initial = form.getFieldsValue()
     setFormValues(initial)
-    checkRequiredFields(initial)
   }, [])
 
-  const checkRequiredFields = (values: any) => {
-    setFormValues({ ...values })
+  const generateNo = async (values: any) => {
+    setIsGenerating(true)
+    try {
+      const no = await window.electronAPI.generateLedgerNo(values.record_type, values.project_name)
+      setLedgerNo(no)
+    } catch (error) {
+      console.error('生成编号失败:', error)
+    } finally {
+      setIsGenerating(false)
+    }
   }
 
-  const onValuesChange = (changedValues: any, allValues: any) => {
-    checkRequiredFields(allValues)
-    if (changedValues.record_type || changedValues.project_name) {
-      generateNo(allValues)
-    }
+  const onValuesChange = (_changedValues: any, allValues: any) => {
+    setFormValues({ ...allValues })
   }
 
   const handleSubmit = async () => {
@@ -90,7 +105,7 @@ const AddRecordPage: React.FC = () => {
       }
 
       if (!ledgerNo) {
-        message.error('台账编号未生成，请先填写单据类型和工程名称')
+        message.error('台账编号未生成，请先完整填写所有必填项')
         return
       }
 
@@ -102,18 +117,13 @@ const AddRecordPage: React.FC = () => {
         receive_date: values.receive_date ? dayjs(values.receive_date).format('YYYY-MM-DD') : dayjs().format('YYYY-MM-DD')
       }
 
-      const id = await window.electronAPI.addRecord(record)
-      if (id) {
-        message.success(`登记成功！台账编号：${ledgerNo}`)
-        form.resetFields()
-        const newInitial = {
-          receive_date: dayjs(),
-          stamped: false,
-          settled: false
-        }
-        form.setFieldsValue(newInitial)
-        setFormValues(newInitial)
-        setLedgerNo('')
+      const result = await window.electronAPI.addRecord(record)
+      if (result && result.id) {
+        setSuccessModal({
+          open: true,
+          record: result.record || record,
+          id: result.id
+        })
       }
     } catch (error) {
       console.error('提交失败:', error)
@@ -132,6 +142,27 @@ const AddRecordPage: React.FC = () => {
     setLedgerNo('')
   }
 
+  const goUploadAttachment = () => {
+    if (successModal.record) {
+      sessionStorage.setItem('selectedRecordId', String(successModal.id))
+    }
+    setSuccessModal({ open: false, record: null, id: 0 })
+    navigate('/attachment')
+  }
+
+  const goViewDetail = () => {
+    if (successModal.record) {
+      sessionStorage.setItem('focusRecordId', String(successModal.id))
+    }
+    setSuccessModal({ open: false, record: null, id: 0 })
+    navigate('/query')
+  }
+
+  const goAddAnother = () => {
+    setSuccessModal({ open: false, record: null, id: 0 })
+    handleReset()
+  }
+
   const requiredLabel = (label: string) => (
     <span>
       {label}
@@ -147,10 +178,14 @@ const AddRecordPage: React.FC = () => {
         <Row align="middle" gutter={16}>
           <Col>
             <span style={{ fontSize: 14, color: '#595959' }}>台账编号：</span>
-            {ledgerNo ? (
+            {canSave && ledgerNo ? (
               <span className="ledger-no-display">{ledgerNo}</span>
+            ) : canSave && isGenerating ? (
+              <Tag color="processing">正在生成编号...</Tag>
             ) : (
-              <Tag color="default">补齐必填项后自动生成</Tag>
+              <Tag color="warning">
+                请完整填写所有必填项后自动生成
+              </Tag>
             )}
           </Col>
           <Col flex="auto">
@@ -160,12 +195,12 @@ const AddRecordPage: React.FC = () => {
                 showIcon
                 icon={<ExclamationCircleOutlined />}
                 message={
-                  <span>
-                    待完善必填项（{missingFields.length}项）：
+                  <Space wrap>
+                    <span>待完善必填项（{missingFields.length}项）：</span>
                     {missingFields.map((f, i) => (
                       <Tag key={f} color="warning" style={{ marginLeft: 4 }}>{f}</Tag>
                     ))}
-                  </span>
+                  </Space>
                 }
                 style={{ border: 'none', padding: 0, background: 'transparent' }}
               />
@@ -174,7 +209,7 @@ const AddRecordPage: React.FC = () => {
                 type="success"
                 showIcon
                 icon={<CheckCircleOutlined />}
-                message="所有必填项已填写完整，可以保存入账"
+                message="所有必填项已填写完整，台账编号已生成，可以保存入账"
                 style={{ border: 'none', padding: 0, background: 'transparent' }}
               />
             )}
@@ -247,7 +282,7 @@ const AddRecordPage: React.FC = () => {
               name="remark"
               label="备注"
             >
-              <TextArea rows={3} placeholder="其他备注信息" maxLength={500} />
+              <TextArea rows={3} placeholder="其他备注信息（可选）" maxLength={500} />
             </Form.Item>
           </Col>
         </Row>
@@ -286,7 +321,7 @@ const AddRecordPage: React.FC = () => {
             <Form.Item
               name="estimated_cost_impact"
               label={requiredLabel('预计费用影响（元）')}
-              rules={[{ required: true, message: '请输入预计费用影响' }]}
+              rules={[{ required: true, message: '请输入预计费用影响，无影响填0' }]}
             >
               <InputNumber
                 style={{ width: '100%' }}
@@ -343,7 +378,7 @@ const AddRecordPage: React.FC = () => {
 
         <Row justify="center">
           <Space size="large">
-            <Tooltip title={canSave ? '' : `还需完善：${missingFields.join('、')}`}>
+            <Tooltip title={canSave ? '所有必填项已完整，编号已生成' : `还需完善：${missingFields.join('、')}`}>
               <Button
                 type="primary"
                 size="large"
@@ -365,6 +400,87 @@ const AddRecordPage: React.FC = () => {
           </Space>
         </Row>
       </Form>
+
+      <Modal
+        open={successModal.open}
+        title={null}
+        footer={null}
+        closable={false}
+        maskClosable={false}
+        width={560}
+      >
+        <Result
+          icon={<CheckCircleOutlined style={{ color: '#52c41a' }} />}
+          status="success"
+          title="登记成功！"
+          subTitle={
+            <Space direction="vertical" size={4} align="center" style={{ width: '100%' }}>
+              <span style={{ fontSize: 22, fontFamily: 'Consolas, monospace', color: '#0958d9', fontWeight: 600 }}>
+                {successModal.record?.ledger_no}
+              </span>
+              <span style={{ color: '#8c8c8c' }}>
+                {successModal.record?.project_name} · {successModal.record?.specialty}
+              </span>
+            </Space>
+          }
+          extra={[
+            <Space direction="vertical" size={12} style={{ width: '100%', marginTop: 12 }}>
+              <Row gutter={12}>
+                <Col span={12}>
+                  <Button
+                    block
+                    type="primary"
+                    size="large"
+                    icon={<PaperClipOutlined />}
+                    onClick={goUploadAttachment}
+                  >
+                    立即上传附件
+                  </Button>
+                </Col>
+                <Col span={12}>
+                  <Button
+                    block
+                    size="large"
+                    icon={<EyeOutlined />}
+                    onClick={goViewDetail}
+                  >
+                    查看台账详情
+                  </Button>
+                </Col>
+              </Row>
+              <Button
+                block
+                size="large"
+                icon={<PlusOutlined />}
+                onClick={goAddAnother}
+              >
+                继续录入下一条
+              </Button>
+            </Space>
+          ]}
+        >
+          <Row gutter={16} style={{ marginTop: 12 }}>
+            <Col span={8}>
+              <Statistic title="涉及专业" value={successModal.record?.specialty} />
+            </Col>
+            <Col span={8}>
+              <Statistic
+                title="费用影响"
+                value={successModal.record?.estimated_cost_impact || 0}
+                prefix="¥"
+                precision={2}
+              />
+            </Col>
+            <Col span={8}>
+              <Statistic
+                title="流转状态"
+                valueRender={() => <FileDoneOutlined style={{ color: '#52c41a' }} />}
+                value={successModal.record?.flow_status}
+              />
+            </Col>
+          </Row>
+        </Result>
+      </Modal>
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useMemo } from 'react'
 import {
   Table,
   Button,
@@ -20,7 +20,8 @@ import {
   Empty,
   Tabs,
   Statistic,
-  Tooltip
+  Tooltip,
+  Collapse
 } from 'antd'
 import {
   SearchOutlined,
@@ -33,13 +34,20 @@ import {
   CalendarOutlined,
   CheckCircleOutlined,
   CloseCircleOutlined,
-  PaperClipOutlined
+  PaperClipOutlined,
+  TeamOutlined,
+  ClockCircleOutlined,
+  FileExcelOutlined
 } from '@ant-design/icons'
 import dayjs from 'dayjs'
-import { LedgerRecord, Attachment, RECORD_TYPES, SPECIALTIES, FLOW_STATUSES, PROPOSED_BY_OPTIONS, getMissingMaterials } from '../types'
+import {
+  LedgerRecord, Attachment, RECORD_TYPES, SPECIALTIES, FLOW_STATUSES, PROPOSED_BY_OPTIONS,
+  getMissingMaterials, ATTACHMENT_CATEGORIES, CATEGORY_COLOR_MAP
+} from '../types'
 
 const { RangePicker } = DatePicker
 const { Option } = Select
+const { Panel } = Collapse
 
 const flowStatusOrder = ['待审核', '审核中', '已审核', '施工中', '已完工', '已盖章', '已结算', '已归档']
 
@@ -49,7 +57,7 @@ const QueryPage: React.FC = () => {
   const [detailModal, setDetailModal] = useState<LedgerRecord | null>(null)
   const [detailAttachments, setDetailAttachments] = useState<Attachment[]>([])
   const [detailVisible, setDetailVisible] = useState(false)
-  const [attachmentCounts, setAttachmentCounts] = useState<Record<number, number>>({})
+  const [attachmentsByRecord, setAttachmentsByRecord] = useState<Record<number, Attachment[]>>({})
   const [filters, setFilters] = useState({
     specialty: '',
     record_type: '',
@@ -62,6 +70,9 @@ const QueryPage: React.FC = () => {
   const [monthlySummary, setMonthlySummary] = useState<any[]>([])
   const [selectedMonth, setSelectedMonth] = useState<string | null>(null)
   const [monthRecords, setMonthRecords] = useState<any[]>([])
+  const [urgencyData, setUrgencyData] = useState<any[]>([])
+  const [selectedUrgency, setSelectedUrgency] = useState<{ proposed_by: string; month: string } | null>(null)
+  const [urgencyRecords, setUrgencyRecords] = useState<any[]>([])
 
   const loadRecords = async () => {
     setLoading(true)
@@ -73,8 +84,17 @@ const QueryPage: React.FC = () => {
       }
       const data = await window.electronAPI.searchRecords(searchParams)
       setRecords(data)
-      const counts = await window.electronAPI.getAttachmentCounts()
-      setAttachmentCounts(counts)
+      const ids = data.map(r => r.id!)
+      let batch: Record<number, Attachment[]> = {}
+      try {
+        batch = await window.electronAPI.getAttachmentCounts() as any
+      } catch (e) { }
+      const atb: Record<number, Attachment[]> = {}
+      for (const r of data) {
+        const atts = await window.electronAPI.getAttachments(r.id!)
+        atb[r.id!] = atts
+      }
+      setAttachmentsByRecord(atb)
     } catch (error) {
       console.error('加载数据失败:', error)
     } finally {
@@ -91,9 +111,28 @@ const QueryPage: React.FC = () => {
     }
   }
 
+  const loadUrgencyBoard = async () => {
+    try {
+      const data = await window.electronAPI.getUrgencyBoard()
+      setUrgencyData(data)
+    } catch (error) {
+      console.error('加载催办看板失败:', error)
+    }
+  }
+
   useEffect(() => {
     loadRecords()
     loadMonthlySummary()
+    loadUrgencyBoard()
+
+    const fid = sessionStorage.getItem('focusRecordId')
+    if (fid) {
+      sessionStorage.removeItem('focusRecordId')
+      setTimeout(() => {
+        const r = records.find(x => String(x.id) === fid)
+        if (r) handleViewDetail(r)
+      }, 800)
+    }
   }, [])
 
   const handleSearch = () => {
@@ -120,6 +159,7 @@ const QueryPage: React.FC = () => {
         message.success('删除成功')
         loadRecords()
         loadMonthlySummary()
+        loadUrgencyBoard()
       }
     } catch (error) {
       message.error('删除失败')
@@ -150,6 +190,16 @@ const QueryPage: React.FC = () => {
     setMonthRecords([])
   }
 
+  const handleUrgencyClick = (item: any) => {
+    setSelectedUrgency({ proposed_by: item.proposed_by, month: item.month })
+    setUrgencyRecords(item.records || [])
+  }
+
+  const handleBackToUrgency = () => {
+    setSelectedUrgency(null)
+    setUrgencyRecords([])
+  }
+
   const getFlowStatusTag = (status: string) => {
     if (['已归档', '已结算', '已盖章'].includes(status)) {
       return <Tag color="success">{status}</Tag>
@@ -159,8 +209,8 @@ const QueryPage: React.FC = () => {
     return <Tag color="default">{status}</Tag>
   }
 
-  const getMissingMaterialsForRecord = (record: LedgerRecord) => {
-    return getMissingMaterials(record, [])
+  const getMissing = (record: LedgerRecord) => {
+    return getMissingMaterials(record, attachmentsByRecord[record.id!] || [])
   }
 
   const getCurrentStepIndex = (status: string) => {
@@ -168,49 +218,22 @@ const QueryPage: React.FC = () => {
     return idx >= 0 ? idx : 0
   }
 
-  const handleExportCSV = async () => {
-    const dataToExport = records
-    if (dataToExport.length === 0) {
+  const handleExportExcel = async () => {
+    if (records.length === 0) {
       message.warning('当前无数据可导出')
       return
     }
-
-    const headers = ['台账编号', '单据类型', '工程名称', '楼栋部位', '涉及专业', '提出单位', '预计费用影响(元)', '流转状态', '收文日期', '盖章状态', '结算状态', '缺失材料', '附件数量']
-    const rows = dataToExport.map(r => {
-      const missing = getMissingMaterialsForRecord(r)
-      const attCount = attachmentCounts[r.id!] || 0
-      return [
-        r.ledger_no,
-        r.record_type,
-        r.project_name,
-        r.building_location || '',
-        r.specialty,
-        r.proposed_by || '',
-        r.estimated_cost_impact || 0,
-        r.flow_status,
-        r.receive_date,
-        r.stamped ? '已盖章' : '未盖章',
-        r.settled ? '已结算' : '未结算',
-        missing.length > 0 ? missing.join('+') : '齐全',
-        attCount
-      ]
-    })
-
-    const csvContent = [
-      headers.join(','),
-      ...rows.map(row => row.map(cell => {
-        const str = String(cell)
-        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-          return `"${str.replace(/"/g, '""')}"`
-        }
-        return str
-      }).join(','))
-    ].join('\n')
-
-    const defaultName = `台账导出_${dayjs().format('YYYYMMDD_HHmmss')}.csv`
-    const result = await window.electronAPI.exportExcel(csvContent, defaultName)
-    if (result) {
-      message.success(`已导出到 ${result}`)
+    try {
+      message.loading({ content: '正在生成 Excel...', key: 'exp' })
+      const result = await window.electronAPI.exportExcel(records)
+      message.destroy('exp')
+      if (result) {
+        message.success(`已导出到：${result}`)
+      }
+    } catch (e) {
+      message.destroy('exp')
+      console.error(e)
+      message.error('导出失败')
     }
   }
 
@@ -255,7 +278,7 @@ const QueryPage: React.FC = () => {
       width: 70
     },
     {
-      title: '提出单位',
+      title: '责任单位',
       dataIndex: 'proposed_by',
       key: 'proposed_by',
       width: 90
@@ -283,9 +306,9 @@ const QueryPage: React.FC = () => {
     {
       title: '缺失材料',
       key: 'missing',
-      width: 160,
+      width: 170,
       render: (_: any, record: LedgerRecord) => {
-        const missing = getMissingMaterialsForRecord(record)
+        const missing = getMissing(record)
         if (missing.length === 0) {
           return <Tag color="success">齐全</Tag>
         }
@@ -303,13 +326,21 @@ const QueryPage: React.FC = () => {
     {
       title: '附件',
       key: 'attachment_count',
-      width: 60,
+      width: 80,
       render: (_: any, record: LedgerRecord) => {
-        const count = attachmentCounts[record.id!] || 0
+        const atts = attachmentsByRecord[record.id!] || []
+        const count = atts.length
+        const catCount = atts.reduce((acc: Record<string, number>, a: Attachment) => {
+          acc[a.category] = (acc[a.category] || 0) + 1
+          return acc
+        }, {})
+        const titleText = Object.entries(catCount).map(([k, v]) => `${k}:${v}`).join('，')
         return (
-          <Badge count={count} size="small" style={{ backgroundColor: count > 0 ? '#52c41a' : '#d9d9d9' }}>
-            <PaperClipOutlined style={{ fontSize: 16, color: '#8c8c8c' }} />
-          </Badge>
+          <Tooltip title={count > 0 ? titleText : '无附件'}>
+            <Badge count={count} size="small" style={{ backgroundColor: count > 0 ? '#52c41a' : '#d9d9d9' }}>
+              <PaperClipOutlined style={{ fontSize: 16, color: '#8c8c8c' }} />
+            </Badge>
+          </Tooltip>
         )
       }
     },
@@ -343,16 +374,17 @@ const QueryPage: React.FC = () => {
     }
   ]
 
-  const monthDetailColumns = [
+  const commonDetailColumns = (extraMissingGetter?: (r: any) => string[]) => [
     {
       title: '台账编号',
       dataIndex: 'ledger_no',
       key: 'ledger_no',
       width: 180,
-      render: (text: string) => (
-        <a style={{ fontFamily: 'Consolas, monospace', color: '#0958d9', fontWeight: 600 }} onClick={() => {
-          const fullRecord = records.find(r => r.id === text) || null
-        }}>
+      render: (text: string, record: any) => (
+        <a
+          style={{ fontFamily: 'Consolas, monospace', color: '#0958d9', fontWeight: 600 }}
+          onClick={() => handleViewDetail(record)}
+        >
           {text}
         </a>
       )
@@ -367,44 +399,34 @@ const QueryPage: React.FC = () => {
         return <Tag color={colorMap[text] || 'default'}>{text}</Tag>
       }
     },
+    { title: '工程名称', dataIndex: 'project_name', key: 'project_name', width: 160, ellipsis: true },
+    { title: '专业', dataIndex: 'specialty', key: 'specialty', width: 70 },
+    { title: '流转状态', dataIndex: 'flow_status', key: 'flow_status', width: 90, render: (t: string) => getFlowStatusTag(t) },
     {
-      title: '工程名称',
-      dataIndex: 'project_name',
-      key: 'project_name',
-      width: 160,
-      ellipsis: true
-    },
-    {
-      title: '专业',
-      dataIndex: 'specialty',
-      key: 'specialty',
-      width: 70
-    },
-    {
-      title: '流转状态',
-      dataIndex: 'flow_status',
-      key: 'flow_status',
-      width: 90,
-      render: (text: string) => getFlowStatusTag(text)
-    },
-    {
-      title: '问题标记',
+      title: '问题',
       key: 'issues',
-      width: 200,
+      width: 240,
       render: (_: any, record: any) => {
         const issues: JSX.Element[] = []
         if (!record.stamped) issues.push(<Tag key="stamp" color="error">未盖章</Tag>)
         if (!record.settled) issues.push(<Tag key="settle" color="error">未结算</Tag>)
-        if (record.attachment_count === 0) issues.push(<Tag key="att" color="warning">缺附件</Tag>)
+        const attCount = record.attachment_count ?? 0
+        if (attCount === 0) issues.push(<Tag key="att" color="warning">缺附件</Tag>)
+        const miss = extraMissingGetter ? extraMissingGetter(record) : record.missing_materials || []
+        if (miss && miss.length > 0) {
+          miss.forEach((m: string, i: number) => issues.push(
+            <Tag key={`m${i}`} color="magenta">{m}</Tag>
+          ))
+        }
         return issues.length > 0 ? <Space size={4} wrap>{issues}</Space> : <Tag color="success">正常</Tag>
       }
     },
     {
-      title: '附件数',
+      title: '附件',
       dataIndex: 'attachment_count',
       key: 'attachment_count',
       width: 70,
-      render: (val: number) => <Badge count={val} style={{ backgroundColor: val > 0 ? '#52c41a' : '#d9d9d9' }} />
+      render: (val: number) => <Badge count={val || 0} style={{ backgroundColor: val > 0 ? '#52c41a' : '#d9d9d9' }} />
     },
     {
       title: '操作',
@@ -417,6 +439,8 @@ const QueryPage: React.FC = () => {
       )
     }
   ]
+
+  const monthDetailColumns = commonDetailColumns()
 
   const renderMonthlyView = () => {
     if (selectedMonth) {
@@ -506,6 +530,205 @@ const QueryPage: React.FC = () => {
               )
             })}
           </Row>
+        )}
+      </div>
+    )
+  }
+
+  const renderUrgencyView = () => {
+    if (selectedUrgency) {
+      return (
+        <div>
+          <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <Space>
+              <Button onClick={handleBackToUrgency}>返回催办看板</Button>
+              <span style={{ fontSize: 16, fontWeight: 600 }}>
+                {selectedUrgency.proposed_by} · {selectedUrgency.month}
+              </span>
+              <Tag color="blue">{urgencyRecords.length} 条待追单据</Tag>
+            </Space>
+          </div>
+          <Table
+            columns={commonDetailColumns((r: any) => r.missing_materials || [])}
+            dataSource={urgencyRecords}
+            rowKey="id"
+            size="small"
+            pagination={false}
+            scroll={{ x: 1000 }}
+          />
+        </div>
+      )
+    }
+
+    const byUnit: Record<string, any> = {}
+    for (const item of urgencyData) {
+      const key = item.proposed_by
+      if (!byUnit[key]) {
+        byUnit[key] = {
+          proposed_by: key,
+          total: 0,
+          missing_stamp: 0,
+          missing_settlement: 0,
+          missing_attachments: 0,
+          missing_total: 0,
+          materials: {} as Record<string, number>,
+          months: [] as any[]
+        }
+      }
+      byUnit[key].total += item.total
+      byUnit[key].missing_stamp += item.missing_stamp
+      byUnit[key].missing_settlement += item.missing_settlement
+      byUnit[key].missing_attachments += item.missing_attachments
+      for (const [m, c] of Object.entries(item.missing_materials_detail || {})) {
+        byUnit[key].materials[m] = (byUnit[key].materials[m] || 0) + (c as number)
+        byUnit[key].missing_total += c as number
+      }
+      byUnit[key].months.push(item)
+    }
+
+    const unitList = Object.values(byUnit).sort((a: any, b: any) => b.missing_total - a.missing_total)
+
+    return (
+      <div>
+        <div style={{ marginBottom: 16 }}>
+          <Row gutter={16}>
+            <Col span={8}>
+              <Card size="small">
+                <Statistic title="责任单位总数" value={unitList.length} prefix={<TeamOutlined />} />
+              </Card>
+            </Col>
+            <Col span={8}>
+              <Card size="small">
+                <Statistic
+                  title="需追材料总数"
+                  value={unitList.reduce((s: number, u: any) => s + u.missing_total, 0)}
+                  valueStyle={{ color: '#cf1322' }}
+                  prefix={<ExclamationCircleOutlined />}
+                />
+              </Card>
+            </Col>
+            <Col span={8}>
+              <Card size="small">
+                <Statistic
+                  title="涉及单据总数"
+                  value={unitList.reduce((s: number, u: any) => s + u.total, 0)}
+                  prefix={<ClockCircleOutlined />}
+                />
+              </Card>
+            </Col>
+          </Row>
+        </div>
+
+        {unitList.length === 0 ? (
+          <Empty description="暂无催办数据" />
+        ) : (
+          <Collapse defaultActiveKey={unitList.slice(0, 3).map((u: any) => u.proposed_by)} ghost>
+            {unitList.map((unit: any) => (
+              <Panel
+                key={unit.proposed_by}
+                header={
+                  <Space>
+                    <TeamOutlined style={{ color: '#1677ff' }} />
+                    <span style={{ fontWeight: 600, fontSize: 15 }}>{unit.proposed_by}</span>
+                    <Tag color="blue">{unit.total} 条单据</Tag>
+                    <Badge
+                      count={`${unit.missing_total}项待追`}
+                      style={{ backgroundColor: unit.missing_total > 0 ? '#cf1322' : '#52c41a' }}
+                    />
+                  </Space>
+                }
+                extra={
+                  <Space size={12} style={{ marginRight: 24 }}>
+                    <Tag color={unit.missing_stamp > 0 ? 'error' : 'success'}>
+                      未盖章 {unit.missing_stamp}
+                    </Tag>
+                    <Tag color={unit.missing_settlement > 0 ? 'error' : 'success'}>
+                      未结算 {unit.missing_settlement}
+                    </Tag>
+                    <Tag color={unit.missing_attachments > 0 ? 'warning' : 'success'}>
+                      缺附件 {unit.missing_attachments}
+                    </Tag>
+                  </Space>
+                }
+              >
+                <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+                  {Object.entries(unit.materials).map(([mat, count]) => (
+                    <Col key={mat}>
+                      <Tag color="error" style={{ padding: '4px 12px', fontSize: 13 }}>
+                        缺{mat}：{count}单
+                      </Tag>
+                    </Col>
+                  ))}
+                  {Object.keys(unit.materials).length === 0 && (
+                    <Col>
+                      <Tag color="success">材料齐全</Tag>
+                    </Col>
+                  )}
+                </Row>
+                <Table
+                  size="small"
+                  dataSource={unit.months}
+                  pagination={false}
+                  rowKey={(r) => `${r.proposed_by}_${r.month}`}
+                  columns={[
+                    {
+                      title: '收文月份',
+                      dataIndex: 'month',
+                      key: 'month',
+                      width: 100,
+                      render: (t) => <Space><CalendarOutlined style={{ color: '#8c8c8c' }} />{t}</Space>
+                    },
+                    { title: '单据数', dataIndex: 'total', key: 'total', width: 70 },
+                    {
+                      title: '未盖章',
+                      dataIndex: 'missing_stamp',
+                      key: 'missing_stamp',
+                      width: 90,
+                      render: (v) => v > 0 ? <Tag color="error">{v}</Tag> : <Tag color="success">0</Tag>
+                    },
+                    {
+                      title: '未结算',
+                      dataIndex: 'missing_settlement',
+                      key: 'missing_settlement',
+                      width: 90,
+                      render: (v) => v > 0 ? <Tag color="error">{v}</Tag> : <Tag color="success">0</Tag>
+                    },
+                    {
+                      title: '缺附件',
+                      dataIndex: 'missing_attachments',
+                      key: 'missing_attachments',
+                      width: 90,
+                      render: (v) => v > 0 ? <Tag color="warning">{v}</Tag> : <Tag color="success">0</Tag>
+                    },
+                    {
+                      title: '待追材料',
+                      key: 'miss',
+                      render: (_: any, r: any) => {
+                        const mats = Object.entries(r.missing_materials_detail || {})
+                          .map(([k, v]) => `${k}×${v}`).join('，')
+                        return mats || <Tag color="success">无</Tag>
+                      }
+                    },
+                    {
+                      title: '操作',
+                      key: 'action',
+                      width: 100,
+                      render: (_: any, r: any) => (
+                        <Button
+                          type="primary"
+                          size="small"
+                          icon={<EyeOutlined />}
+                          onClick={() => handleUrgencyClick(r)}
+                        >
+                          追这月
+                        </Button>
+                      )
+                    }
+                  ]}
+                />
+              </Panel>
+            ))}
+          </Collapse>
         )}
       </div>
     )
@@ -610,9 +833,18 @@ const QueryPage: React.FC = () => {
                           <Button icon={<ReloadOutlined />} onClick={handleReset}>
                             重置
                           </Button>
-                          <Button icon={<DownloadOutlined />} onClick={handleExportCSV}>
-                            导出当前结果
-                          </Button>
+                          <Tooltip title="导出当前筛选结果为 Excel（包含缺失材料按附件重新计算）">
+                            <Button
+                              type="primary"
+                              ghost
+                              icon={<FileExcelOutlined />}
+                              onClick={handleExportExcel}
+                              disabled={records.length === 0}
+                              style={{ borderColor: '#52c41a', color: '#52c41a' }}
+                            >
+                              导出Excel ({records.length})
+                            </Button>
+                          </Tooltip>
                         </Space>
                       </Space>
                     </Col>
@@ -624,7 +856,7 @@ const QueryPage: React.FC = () => {
                   dataSource={records}
                   rowKey="id"
                   loading={loading}
-                  scroll={{ x: 1400, y: 460 }}
+                  scroll={{ x: 1500, y: 420 }}
                   pagination={{
                     showSizeChanger: true,
                     showQuickJumper: true,
@@ -647,6 +879,16 @@ const QueryPage: React.FC = () => {
               </span>
             ),
             children: renderMonthlyView()
+          },
+          {
+            key: 'urgency',
+            label: (
+              <span>
+                <TeamOutlined />
+                资料催办看板
+              </span>
+            ),
+            children: renderUrgencyView()
           }
         ]}
       />
@@ -660,7 +902,7 @@ const QueryPage: React.FC = () => {
         }
         open={detailVisible}
         onCancel={() => setDetailVisible(false)}
-        width={800}
+        width={820}
         footer={[
           <Button key="close" onClick={() => setDetailVisible(false)}>
             关闭
@@ -722,7 +964,7 @@ const QueryPage: React.FC = () => {
               })}
             </div>
 
-            <Divider orientation="left">材料齐备情况</Divider>
+            <Divider orientation="left">材料齐备情况（结合已上传附件重新计算）</Divider>
             {(() => {
               const missing = getMissingMaterials(detailModal, detailAttachments)
               return missing.length === 0 ? (
@@ -741,13 +983,31 @@ const QueryPage: React.FC = () => {
             {detailAttachments.length > 0 && (
               <>
                 <Divider orientation="left">已归档附件（{detailAttachments.length}个）</Divider>
-                <Space wrap>
-                  {detailAttachments.map(att => (
-                    <Tag key={att.id} color="blue" icon={<PaperClipOutlined />}>
-                      {att.category}：{att.file_name}
-                    </Tag>
-                  ))}
-                </Space>
+                <Row gutter={[8, 8]}>
+                  {ATTACHMENT_CATEGORIES.map(cat => {
+                    const list = detailAttachments.filter(a => a.category === cat)
+                    if (list.length === 0) return null
+                    return (
+                      <Col span={24} key={cat}>
+                        <Tag
+                          color={CATEGORY_COLOR_MAP[cat] || '#8c8c8c'}
+                          style={{ fontSize: 13, padding: '2px 8px', marginBottom: 4 }}
+                        >
+                          {cat}（{list.length}）
+                        </Tag>
+                        <div style={{ marginTop: 4, paddingLeft: 4 }}>
+                          <Space wrap size={4}>
+                            {list.map(a => (
+                              <Tag key={a.id} color="blue" icon={<PaperClipOutlined />}>
+                                {a.file_name}
+                              </Tag>
+                            ))}
+                          </Space>
+                        </div>
+                      </Col>
+                    )
+                  })}
+                </Row>
               </>
             )}
           </>

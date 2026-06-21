@@ -1,6 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import dayjs from 'dayjs'
+import * as XLSX from 'xlsx'
 
 export interface LedgerRecord {
   id?: number
@@ -38,6 +39,8 @@ interface DatabaseData {
   nextRecordId: number
   nextAttachmentId: number
 }
+
+export const ATTACHMENT_CATEGORIES = ['扫描件', '照片', '会议纪要', '结算资料', '其他'] as const
 
 let dbPath: string = ''
 let cache: DatabaseData | null = null
@@ -82,6 +85,27 @@ function guessCategory(fileName: string, fileType: string): string {
   return '扫描件'
 }
 
+export function getMissingMaterialsForRecord(record: LedgerRecord, attachments: Attachment[] = []): string[] {
+  const missing: string[] = []
+  if (!record.stamped) {
+    const hasStampScan = attachments.some(a => a.category === '扫描件')
+    if (!hasStampScan) missing.push('盖章件')
+  }
+  if (!record.settled) {
+    const hasSettlement = attachments.some(a => a.category === '结算资料')
+    if (!hasSettlement) missing.push('结算单')
+  }
+  if (!record.change_reason) {
+    const hasScan = attachments.some(a => a.category === '扫描件')
+    if (!hasScan) missing.push('变更说明')
+  }
+  const hasMeetingMinutes = attachments.some(a => a.category === '会议纪要')
+  if (!hasMeetingMinutes) missing.push('会议纪要')
+  const hasPhoto = attachments.some(a => a.category === '照片')
+  if (!hasPhoto) missing.push('现场照片')
+  return missing
+}
+
 export function getUserDataPath(): string {
   return path.dirname(dbPath)
 }
@@ -104,10 +128,6 @@ function saveData(data: DatabaseData): void {
     fs.mkdirSync(dir, { recursive: true })
   }
   fs.writeFileSync(dbPath, JSON.stringify(data, null, 2), 'utf-8')
-}
-
-function invalidateCache(): void {
-  cache = null
 }
 
 export function generateLedgerNo(recordType: string, projectName: string): string {
@@ -154,6 +174,11 @@ export function addRecord(record: LedgerRecord): number {
   data.nextRecordId = id + 1
   saveData(data)
   return id
+}
+
+export function getRecordById(id: number): LedgerRecord | null {
+  const data = loadData()
+  return data.records.find(r => r.id === id) || null
 }
 
 export function updateRecord(id: number, record: Partial<LedgerRecord>): boolean {
@@ -254,6 +279,48 @@ export function getMonthlySummary(): any[] {
   }
 
   return Object.values(recordsByMonth).sort((a: any, b: any) => b.month.localeCompare(a.month))
+}
+
+export function getUrgencyBoard(): any[] {
+  const data = loadData()
+  const map: Record<string, any> = {}
+
+  for (const r of data.records) {
+    if (!r.proposed_by) continue
+    const month = r.receive_date ? r.receive_date.substring(0, 7) : '未标注月份'
+    const key = `${r.proposed_by}__${month}`
+
+    if (!map[key]) {
+      map[key] = {
+        proposed_by: r.proposed_by,
+        month,
+        total: 0,
+        missing_stamp: 0,
+        missing_settlement: 0,
+        missing_attachments: 0,
+        missing_materials_detail: {} as Record<string, number>,
+        records: []
+      }
+    }
+
+    const atts = data.attachments.filter(a => a.record_id === r.id)
+    const missing = getMissingMaterialsForRecord(r, atts)
+
+    map[key].total++
+    if (!r.stamped) map[key].missing_stamp++
+    if (!r.settled) map[key].missing_settlement++
+    if (atts.length === 0) map[key].missing_attachments++
+    for (const m of missing) {
+      map[key].missing_materials_detail[m] = (map[key].missing_materials_detail[m] || 0) + 1
+    }
+    map[key].records.push({
+      ...r,
+      attachment_count: atts.length,
+      missing_materials: missing
+    })
+  }
+
+  return Object.values(map).sort((a: any, b: any) => b.total - a.total)
 }
 
 export function getAllAttachments(recordId: number): Attachment[] {
@@ -367,6 +434,206 @@ export function deleteAttachmentWithFile(id: number): boolean {
     }
   }
   return deleteAttachment(id)
+}
+
+export function generateHandoverPackage(recordId: number, targetDir: string): { path: string; manifest: any } | null {
+  try {
+    const data = loadData()
+    const record = data.records.find(r => r.id === recordId)
+    if (!record) return null
+
+    const atts = data.attachments.filter(a => a.record_id === recordId)
+    const missing = getMissingMaterialsForRecord(record, atts)
+
+    const pkgDir = path.join(targetDir, `${record.ledger_no}_移交包_${dayjs().format('YYYYMMDD_HHmmss')}`)
+    fs.mkdirSync(pkgDir, { recursive: true })
+
+    for (const cat of ATTACHMENT_CATEGORIES) {
+      fs.mkdirSync(path.join(pkgDir, cat), { recursive: true })
+    }
+    fs.mkdirSync(path.join(pkgDir, '待补材料'), { recursive: true })
+
+    const copied: any[] = []
+    for (const att of atts) {
+      const catDir = ATTACHMENT_CATEGORIES.includes(att.category as any) ? att.category : '其他'
+      const dest = path.join(pkgDir, catDir, att.file_name)
+      try {
+        if (fs.existsSync(att.file_path)) {
+          fs.copyFileSync(att.file_path, dest)
+          copied.push({ category: catDir, file_name: att.file_name, file_size: att.file_size })
+        }
+      } catch (e) {
+        console.error('复制失败:', att.file_name, e)
+      }
+    }
+
+    const missingInfo: any[] = missing.map(m => ({
+      材料名称: m,
+      说明: getMaterialDescription(m),
+      状态: '待补充'
+    }))
+
+    const manifest = {
+      '台账编号': record.ledger_no,
+      '单据类型': record.record_type,
+      '工程名称': record.project_name,
+      '楼栋部位': record.building_location || '-',
+      '涉及专业': record.specialty,
+      '提出单位': record.proposed_by || '-',
+      '预计费用影响': record.estimated_cost_impact ? `¥${record.estimated_cost_impact.toLocaleString()}` : '¥0',
+      '流转状态': record.flow_status,
+      '收文日期': record.receive_date,
+      '盖章状态': record.stamped ? '已盖章' : '未盖章',
+      '结算状态': record.settled ? '已结算' : '未结算',
+      '变更原因': record.change_reason || '-',
+      '生成时间': dayjs().format('YYYY-MM-DD HH:mm:ss'),
+      '附件总数': atts.length,
+      '待补材料数': missing.length
+    }
+
+    const manifestSheet = [
+      ['项目资料移交清单', ''],
+      ...Object.entries(manifest).map(([k, v]) => [k, v as any]),
+      ['', ''],
+      ['--- 已归档附件明细 ---', ''],
+      ['分类', '文件名', '大小(KB)'],
+      ...copied.map(c => [c.category, c.file_name, (c.file_size / 1024).toFixed(1)])
+    ]
+
+    if (missing.length > 0) {
+      manifestSheet.push(['', ''], ['--- 待补材料清单 ---', ''], ['材料名称', '说明', '状态'],
+        ...missingInfo.map(m => [m['材料名称'], m['说明'], m['状态']]))
+    }
+
+    const ws = XLSX.utils.aoa_to_sheet(manifestSheet)
+    ws['!cols'] = [{ wch: 20 }, { wch: 50 }, { wch: 12 }]
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, '移交清单')
+    const xlsxPath = path.join(pkgDir, `移交清单_${record.ledger_no}.xlsx`)
+    XLSX.writeFile(wb, xlsxPath)
+
+    const txtContent = [
+      `项目资料移交清单`,
+      `生成时间: ${dayjs().format('YYYY-MM-DD HH:mm:ss')}`,
+      ``,
+      `=== 台账信息 ===`,
+      `台账编号: ${record.ledger_no}`,
+      `单据类型: ${record.record_type}`,
+      `工程名称: ${record.project_name}`,
+      `楼栋部位: ${record.building_location || '-'}`,
+      `涉及专业: ${record.specialty}`,
+      `提出单位: ${record.proposed_by || '-'}`,
+      `预计费用影响: ¥${record.estimated_cost_impact?.toLocaleString() || '0'}`,
+      `流转状态: ${record.flow_status}`,
+      `收文日期: ${record.receive_date}`,
+      `盖章状态: ${record.stamped ? '已盖章' : '未盖章'}`,
+      `结算状态: ${record.settled ? '已结算' : '未结算'}`,
+      `变更原因: ${record.change_reason || '-'}`,
+      ``,
+      `=== 已归档附件 (${atts.length}份) ===`,
+      ...ATTACHMENT_CATEGORIES.map(cat => {
+        const list = copied.filter(c => c.category === cat)
+        if (list.length === 0) return `[${cat}] 无`
+        return `[${cat}] ${list.length}份:\n  ` + list.map(c => `- ${c.file_name} (${(c.file_size / 1024).toFixed(1)}KB)`).join('\n  ')
+      }).join('\n'),
+      ``,
+      `=== 待补材料 (${missing.length}项) ===`,
+      missing.length === 0 ? '材料齐全，可移交' : missing.map(m => `! ${m} - ${getMaterialDescription(m)}`).join('\n')
+    ].join('\n')
+
+    fs.writeFileSync(path.join(pkgDir, '移交说明.txt'), txtContent, 'utf-8')
+
+    return {
+      path: pkgDir,
+      manifest: {
+        ...manifest,
+        attachments_copied: copied.length,
+        missing_materials: missing
+      }
+    }
+  } catch (e) {
+    console.error('生成移交包失败:', e)
+    return null
+  }
+}
+
+function getMaterialDescription(key: string): string {
+  const map: Record<string, string> = {
+    '盖章件': '需要建设/设计/监理三方盖章的设计变更扫描件',
+    '结算单': '费用结算单或签证计价单',
+    '变更说明': '变更内容的正式说明文件扫描件',
+    '会议纪要': '相关专题讨论会的签到及会议纪要',
+    '现场照片': '变更部位施工前/中/后对比照片'
+  }
+  return map[key] || key
+}
+
+export function exportRecordsToExcel(records: LedgerRecord[], defaultName: string, saveDir: string): string | null {
+  try {
+    const data = loadData()
+    const attsBatch = getAttachmentsBatch(records.map(r => r.id!))
+
+    const headerRow = [
+      '台账编号', '单据类型', '工程名称', '楼栋部位', '涉及专业', '提出单位',
+      '预计费用影响(元)', '流转状态', '收文日期', '盖章状态', '结算状态',
+      '缺失材料', '附件数量', '附件分类统计'
+    ]
+
+    const dataRows: any[][] = records.map(r => {
+      const atts = attsBatch[r.id!] || []
+      const missing = getMissingMaterialsForRecord(r, atts)
+      const catCount: Record<string, number> = {}
+      atts.forEach(a => {
+        catCount[a.category] = (catCount[a.category] || 0) + 1
+      })
+
+      return [
+        r.ledger_no,
+        r.record_type,
+        r.project_name,
+        r.building_location || '',
+        r.specialty,
+        r.proposed_by || '',
+        r.estimated_cost_impact || 0,
+        r.flow_status,
+        r.receive_date,
+        r.stamped ? '已盖章' : '未盖章',
+        r.settled ? '已结算' : '未结算',
+        missing.length > 0 ? missing.join('、') : '齐全',
+        atts.length,
+        Object.entries(catCount).map(([k, v]) => `${k}${v}`).join(' / ') || '无'
+      ]
+    })
+
+    const ws = XLSX.utils.aoa_to_sheet([headerRow, ...dataRows])
+    ws['!cols'] = [
+      { wch: 20 }, { wch: 10 }, { wch: 20 }, { wch: 14 }, { wch: 8 }, { wch: 10 },
+      { wch: 14 }, { wch: 10 }, { wch: 12 }, { wch: 8 }, { wch: 8 },
+      { wch: 20 }, { wch: 8 }, { wch: 24 }
+    ]
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, '台账清单')
+
+    const summarySheet = [
+      ['台账汇总', ''],
+      ['生成时间', dayjs().format('YYYY-MM-DD HH:mm:ss')],
+      ['导出条数', records.length],
+      ['未盖章', records.filter(r => !r.stamped).length],
+      ['未结算', records.filter(r => !r.settled).length],
+      ['有缺失材料', records.filter(r => getMissingMaterialsForRecord(r, attsBatch[r.id!] || []).length > 0).length],
+      ['预计费用合计(元)', records.reduce((s, r) => s + (r.estimated_cost_impact || 0), 0)]
+    ]
+    const ws2 = XLSX.utils.aoa_to_sheet(summarySheet)
+    ws2['!cols'] = [{ wch: 18 }, { wch: 30 }]
+    XLSX.utils.book_append_sheet(wb, ws2, '汇总统计')
+
+    const finalPath = path.join(saveDir, defaultName)
+    XLSX.writeFile(wb, finalPath)
+    return finalPath
+  } catch (e) {
+    console.error('导出Excel失败:', e)
+    return null
+  }
 }
 
 export { }

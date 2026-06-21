@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openFolder: (folderPath: string) => ipcRenderer.invoke('open-folder', folderPath),
   getMonthlySummary: () => ipcRenderer.invoke('get-monthly-summary'),
   getAttachmentCounts: () => ipcRenderer.invoke('get-attachment-counts'),
-  exportExcel: (csvContent: string, defaultName: string) =>
-    ipcRenderer.invoke('export-excel', csvContent, defaultName)
+  getUrgencyBoard: () => ipcRenderer.invoke('get-urgency-board'),
+  exportExcel: (records: any[]) => ipcRenderer.invoke('export-excel', records),
+  generateHandoverPackage: (recordId: number) => ipcRenderer.invoke('generate-handover-package', recordId)
 })
